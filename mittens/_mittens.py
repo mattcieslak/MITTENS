@@ -331,10 +331,25 @@ class MITTENS(object):
             prob_mat = self.none_ahead_results
             null_p = self.none_ahead_null_probs
 
-        if weighting_scheme == "negative_log_p":
-            weighting_func = lambda x: -np.log(x)
-        else:
-            weighting_func = lambda x: null_p - x
+        def weighting_func(probs):
+            if weighting_scheme == "negative_log_p":
+                probs = probs
+            elif weighting_scheme == "sharpen":
+                scaled_probs = probs/null_p
+                probs = scaled_probs/np.linalg.norm(scaled_probs)
+            elif weighting_scheme == "ratio":
+                probs = probs/max(null_p)
+                high_array_indices = probs > 1
+                probs[high_array_indices] = 1
+            elif weighting_scheme == "normalized_ratio":
+                probs = probs/max(null_p)
+                high_array_indices = probs > 1
+                probs[high_array_indices] = 1 
+                probs = probs/np.linalg.norm(probs)
+            else:
+                raise NotImplementedError("Unknown weighting scheme")
+            return -np.log(probs)
+                
 
         # Add the voxels and their 
         for j, starting_voxel in tqdm(enumerate(self.voxel_coords),total=self.nvoxels):
