@@ -46,6 +46,7 @@ class MITTENS(object):
         self.coordinate_lut = None
         self.label_lut = None
         self.voxel_graph = None
+        self.atlas_labels = None
         # From args
         self.step_size = step_size
         self.odf_resolution = odf_resolution
@@ -379,10 +380,11 @@ class MITTENS(object):
             atlas_data = atlas_data[:,::-1,:]
         if atlas_img.affine[2,2] < 0:
             atlas_data = atlas_data[:,:,::-1]
-        atlas_labels = atlas_data.flatten(order="F")[self.flat_mask]
-
-        # Add connections between a "label" node and 
+        #This will need to be accessed from the graph query function
+        self.atlas_labels = atlas_data.flatten(order="F")[self.flat_mask]
         self.label_lut = {}
+        # Add connections between a "label" node and 
+        '''self.label_lut = {}
         for label in np.unique(atlas_labels):
             connected_nodes = np.flatnonzero(atlas_labels == label)
             if len(connected_nodes) < min_voxels: continue
@@ -391,11 +393,93 @@ class MITTENS(object):
             self.label_lut[label] = label_node
             for connected_node in connected_nodes:
                 self.voxel_graph.addEdge(label_node,connected_node,w=0)
-                self.voxel_graph.addEdge(connected_node,label_node,w=0)
+                self.voxel_graph.addEdge(connected_node,label_node,w=0)'''
             
     def query_region_pair(self, from_id, to_id, n_paths=1, write_trk="",
             write_nifti=""):
-        pass
+        if self.label_lut is None:
+            raise ValueError("No atlas information found")
+        def set_source():
+            connected_nodes = np.flatnonzero(self.atlas_labels == from_id)
+            self.voxel_graph.addNode()
+            label_node = self.voxel_graph.numberOfNodes() - 1 
+            self.label_lut[from_id] = label_node
+            for connected_node in connected_nodes:
+                self.voxel_graph.addEdge(label_node, connected_node, w=0)
+
+        def set_sink():
+            connected_nodes = np.flatnonzero(self.atlas_labels == to_id)
+            self.voxel_graph.addNode()
+            label_node = self.voxel_graph.numberOfNodes() - 1
+            self.label_lut[to_id] = label_node
+            for connected_node in connected_nodes:
+                self.voxel_graph.addEdge(connected_node, label_node, w=0)
+
+        def Dijkstra(g, source, sink):
+            d = networkit.graph.Dijkstra(g, source, storePaths=True, storeStack=False, target = sink)
+            d.run()
+            path = d.getPath(self.label_lut[to_id])
+            return path
+
+        def getCost(g, path):
+            cost = 0 
+            for i in range(len(path)-1):
+                cost += g.weight(path[i], path[i+1])
+            return cost
+
+        def YenKSP():
+            foundPaths = []
+            shortestPath = Dijkstra(self.voxel_graph, self.label_lut[from_id], self.label_lut[to_id]) 
+            cost = getCost(self.voxel_graph, shortestPath)
+            foundPaths.append(shortestPath)
+            potentialPaths = set()
+            graph_copy = networkit.graph.Graph(self.voxel_graph, weighted=True, directed=True)
+            for k in range(1,n_paths):
+                for i in range(0, len(foundPaths[-1]) - 2):
+                    removedEdges = []
+                    spurNode = foundPaths[k-1][i]
+                    rootPath = foundPaths[k-1][0:i+1]
+                    for path in foundPaths:
+                        if (rootPath == path[0:i+1]):
+                            if (graph_copy.hasEdge(path[i], path[i+1])):
+                                w = graph_copy.weight(path[i], path[i+1])
+                                graph_copy.removeEdge(path[i], path[i+1])
+                                removedEdges.append([path[i], path[i+1],w])
+                    def callbackOut(u, v, weight, edge_id):
+                        removedEdges.append([u,v,weight])
+                        graph_copy.removeEdge(u,v)
+                    def callbackIn(u, v, weight, edge_id):
+                        removedEdges.append([v,u,weight])
+                        graph_copy.removeEdge(v, u)
+
+                    for rootNode in rootPath:
+                        if (rootNode != spurNode):
+                            graph_copy.forEdgesOf(rootNode, callbackOut)
+                            graph_copy.forInEdgesOf(rootNode, callbackIn)
+
+
+                    spurPath = Dijkstra(graph_copy, spurNode, self.label_lut[to_id])
+                    totalPath = []
+                    for n in rootPath:
+                        totalPath.append(n)
+                    for n in spurPath[1:]:
+                        totalPath.append(n)
+                    cost = getCost(self.voxel_graph, totalPath)
+                    potentialPaths.add(tuple(totalPath) + (cost,))
+                    for e in removedEdges:
+                        graph_copy.addEdge(e[0], e[1], w=e[2])
+                if (not potentialPaths):
+                    break
+                potentialPaths = list(potentialPaths)
+                potentialPaths.sort(key = lambda x:x[-1])
+                foundPaths.append(potentialPaths[0][0:-1])
+                potentialPaths.remove(potentialPaths[0])
+                potentialPaths = set(potentialPaths)
+            return foundPaths
+
+        set_source()
+        set_sink()
+        return YenKSP()
 
     def calculate_connectivity_matrices(self,opts):
         """
