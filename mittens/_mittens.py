@@ -31,6 +31,9 @@ opposites = [
     ("rpi","las")
     ]
 
+hdr = np.array((b'TRACK', [ 98, 121, 121], [ 2.,  2.,  2.], [ 0.,  0.,  0.], 0, [b'', b'', b'', b'', b'', b'', b'', b'', b'', b''], 0, [b'', b'', b'', b'', b'', b'', b'', b'', b'', b''], [[-2.,  0.,  0.,  0.], [ 0., -2.,  0.,  0.], [ 0.,  0.,  2.,  0.], [ 0.,  0.,  0.,  1.]], b' A diffusion spectrum imaging scheme was used, and a total of 257 diffusion sampling were acquired. The maximum b-value was 4985 s/mm2. The in-plane resolution was 2 mm. The slice thickness was 2 mm. The diffusion data were reconstructed using generalized q-sampling imaging (Yeh et al., IEEE TMI, ;29(9):1626-35, 2010) with a diffusion sampling length ratio of 1.25.\nA deterministic fiber tracking algorithm (Yeh et al., PLoS ONE 8(11): e80713', b'LPS', b'LPS', [ 1.,  0.,  0.,  0.,  1.,  0.], b'', b'', b'', b'', b'', b'', b'', 253, 2, 1000),
+              dtype=[('id_string', 'S6'), ('dim', '<i2', (3,)), ('voxel_size', '<f4', (3,)), ('origin', '<f4', (3,)), ('n_scalars', '<i2'), ('scalar_name', 'S20', (10,)), ('n_properties', '<i2'), ('property_name', 'S20', (10,)), ('vox_to_ras', '<f4', (4, 4)), ('reserved', 'S444'), ('voxel_order', 'S4'), ('pad2', 'S4'), ('image_orientation_patient', '<f4', (6,)), ('pad1', 'S2'), ('invert_x', 'S1'), ('invert_y', 'S1'), ('invert_z', 'S1'), ('swap_xy', 'S1'), ('swap_yz', 'S1'), ('swap_zx', 'S1'), ('n_count', '<i4'), ('version', '<i4'), ('hdr_size', '<i4')])
+
 
 class MITTENS(object):
     def __init__(self, fibgz_file="", nifti_prefix="", step_size=np.sqrt(3)/2. , angle_max=35,
@@ -47,6 +50,7 @@ class MITTENS(object):
         self.label_lut = None
         self.voxel_graph = None
         self.atlas_labels = None
+        self.weighting_scheme = None
         # From args
         self.step_size = step_size
         self.odf_resolution = odf_resolution
@@ -325,6 +329,7 @@ class MITTENS(object):
 
     def build_graph(self,one_ahead=True, weighting_scheme="negative_log_p"):
         G = networkit.graph.Graph(self.nvoxels, weighted=True, directed=True)
+        self.weighting_scheme = weighting_scheme
         if one_ahead:
             prob_mat = self.one_ahead_results
             null_p = self.one_ahead_null_probs
@@ -397,23 +402,36 @@ class MITTENS(object):
             
     def query_region_pair(self, from_id, to_id, n_paths=1, write_trk="",
             write_nifti=""):
+        if self.voxel_graph is None:
+            raise ValueError("Please construct a voxel graph first")
         if self.label_lut is None:
             raise ValueError("No atlas information found")
         def set_source():
             connected_nodes = np.flatnonzero(self.atlas_labels == from_id)
-            self.voxel_graph.addNode()
-            label_node = self.voxel_graph.numberOfNodes() - 1 
-            self.label_lut[from_id] = label_node
+            if (from_id in self.label_lut):
+                label_node = self.label_lut[from_id]
+            else:
+                self.voxel_graph.addNode()
+                label_node = self.voxel_graph.numberOfNodes() - 1 
+                self.label_lut[from_id] = label_node
             for connected_node in connected_nodes:
+                #be sure to remove any edges from when from_id was set to a sink
+                if (self.voxel_graph.hasEdge(connected_node, label_node)):
+                    self.voxel_graph.removeEdge(connected_node, label_node)
                 self.voxel_graph.addEdge(label_node, connected_node, w=0)
 
         def set_sink():
             connected_nodes = np.flatnonzero(self.atlas_labels == to_id)
-            self.voxel_graph.addNode()
-            label_node = self.voxel_graph.numberOfNodes() - 1
-            self.label_lut[to_id] = label_node
+            if (to_id in self.label_lut):
+                label_node = self.label_lut[to_id]
+            else:
+                self.voxel_graph.addNode()
+                label_node = self.voxel_graph.numberOfNodes() - 1
+                self.label_lut[to_id] = label_node
             for connected_node in connected_nodes:
-                self.voxel_graph.addEdge(connected_node, label_node, w=0)
+                if (self.voxel_graph.hasEdge(label_node, connected_node)):
+                    self.voxel_graph.removeEdge(label_node, connected_node)
+                self.voxel_graph.addEdge(connected_node,label_node, w=0)
 
         def Dijkstra(g, source, sink):
             d = networkit.graph.Dijkstra(g, source, storePaths=True, storeStack=False, target = sink)
@@ -426,6 +444,12 @@ class MITTENS(object):
             for i in range(len(path)-1):
                 cost += g.weight(path[i], path[i+1])
             return cost
+
+        def getProbability(g, path):
+            prob = 1
+            for i in range(len(path) -1):
+                prob*=np.e**(-g.weight(path[i], path[i+1]))
+            return prob 
 
         def YenKSP():
             foundPaths = []
@@ -479,7 +503,12 @@ class MITTENS(object):
 
         set_source()
         set_sink()
-        return YenKSP()
+        paths = YenKSP()
+        if (not (write_trk == "")):
+            trk_paths = []
+            for path in paths:
+                trk_paths.append((self.voxel_coords[np.array(path[1:-1])]*2.0, None, None))
+            nib.trackvis.write('%s_%s_%s_%s_%s.trk.gz'%(write_trk, from_id, to_id, self.weighting_scheme,n_paths), trk_paths, hdr )
 
     def calculate_connectivity_matrices(self,opts):
         """
