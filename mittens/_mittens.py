@@ -85,26 +85,26 @@ class MITTENS(object):
                 self.odf_vertices.shape[0]
         
         # None-ahead Model
-        self.none_ahead_funcs = self.get_prob_funcs("none_ahead")
-        none_ahead_null_probs = []
+        self.singleODF_funcs = self.get_prob_funcs("singleODF")
+        singleODF_null_probs = []
         for k in neighbor_names:
-            none_ahead_null_probs.append( self.none_ahead_funcs[k](
+            singleODF_null_probs.append( self.singleODF_funcs[k](
                     self.isotropic, self.prob_angles_weighted))
-        self.none_ahead_null_probs = np.array(none_ahead_null_probs)
-        #if not self.none_ahead_null_probs.sum() == 1.:
+        self.singleODF_null_probs = np.array(singleODF_null_probs)
+        #if not self.singleODF_null_probs.sum() == 1.:
         #    raise ValueError("Null probailities do not add up to 1. Check Fortran")
 
         # One-ahead Model
-        self.one_ahead_funcs = self.get_prob_funcs("one_ahead")
-        one_ahead_null_probs = []
+        self.doubleODF_funcs = self.get_prob_funcs("doubleODF")
+        doubleODF_null_probs = []
         isotropic_x2 = compute_weights_as_neighbor_voxels(
             self.isotropic[np.newaxis,:], self.prob_angles_weighted).squeeze()
         for k in neighbor_names:
-            one_ahead_null_probs.append( self.one_ahead_funcs[k](
+            doubleODF_null_probs.append( self.doubleODF_funcs[k](
                     self.isotropic, isotropic_x2, self.prob_angles_weighted))
-        self.one_ahead_null_probs = np.array(one_ahead_null_probs)
-        self.one_ahead_null_probs[np.isnan(self.one_ahead_null_probs)]= 0 
-        self.one_ahead_null_probs = self.one_ahead_null_probs / self.one_ahead_null_probs.sum()
+        self.doubleODF_null_probs = np.array(doubleODF_null_probs)
+        self.doubleODF_null_probs[np.isnan(self.doubleODF_null_probs)]= 0 
+        self.doubleODF_null_probs = self.doubleODF_null_probs / self.doubleODF_null_probs.sum()
 
     def _load_fibgz(self, path):
         logger.info("Loading %s", path)
@@ -149,7 +149,7 @@ class MITTENS(object):
         self.odf_values = self.odf_values / self.odf_values.sum(1)[:,np.newaxis] * 0.5
         logger.info("Loaded ODF data: %s",str(self.odf_values.shape))
 
-    def get_prob_funcs(self, order="none_ahead"):
+    def get_prob_funcs(self, order="singleODF"):
 
         requested_module = "%s_%s_ss%.2f_am%d" % (order, self.odf_resolution, 
                 self.step_size, self.angle_max)
@@ -191,7 +191,7 @@ class MITTENS(object):
         nib.Nifti1Image(out_data.astype(np.float32), self.ras_affine
                 ).to_filename(fname)
 
-    def estimate_none_ahead(self, output_prefix=""):
+    def estimate_singleODF(self, output_prefix=""):
         
         # Output matrix
         outputs = np.zeros((self.nvoxels,len(neighbor_names)),dtype=np.float)
@@ -203,27 +203,27 @@ class MITTENS(object):
             if n%10000 == 0:
                 logger.info("ODF %d/%d", n, self.nvoxels)
             for m, nbr_name in enumerate(neighbor_names):
-                outputs[n,m] = self.none_ahead_funcs[nbr_name](
+                outputs[n,m] = self.singleODF_funcs[nbr_name](
                     odf, prob_angles)
 
-        self.none_ahead_results = outputs
+        self.singleODF_results = outputs
         logger.info("Calculating None-Ahead CoDI")
-        self.none_ahead_codi = aitchison_distance(self.none_ahead_null_probs, self.none_ahead_results)
+        self.singleODF_codi = aitchison_distance(self.singleODF_null_probs, self.singleODF_results)
         logger.info("Calculating Order1 KL Distance")
-        self.none_ahead_kl = kl_distance(self.none_ahead_null_probs, self.none_ahead_results)
+        self.singleODF_kl = kl_distance(self.singleODF_null_probs, self.singleODF_results)
 
         # Write outputs if requested
         if output_prefix:
-            logger.info("Writing none_ahead results")
+            logger.info("Writing singleODF results")
             for a in neighbor_names:
-                outf = output_prefix + "_none_ahead_%s_prob.nii.gz" % a
+                outf = output_prefix + "_singleODF_%s_prob.nii.gz" % a
                 logger.info("Writing %s", outf)
                 self.save_nifti(
-                        self.none_ahead_results[:,neighbor_names.index(a)], outf)
-            self.save_nifti(self.none_ahead_kl, output_prefix + "_none_ahead_KL.nii.gz")
-            self.save_nifti(self.none_ahead_codi, output_prefix + "_none_ahead_CoDI.nii.gz")
+                        self.singleODF_results[:,neighbor_names.index(a)], outf)
+            self.save_nifti(self.singleODF_kl, output_prefix + "_singleODF_KL.nii.gz")
+            self.save_nifti(self.singleODF_codi, output_prefix + "_singleODF_CoDI.nii.gz")
 
-    def estimate_one_ahead(self, output_prefix=""):
+    def estimate_doubleODF(self, output_prefix=""):
         
         logger.info("Pre-computing neighbor angle weights")
         Ypc = compute_weights_as_neighbor_voxels(
@@ -254,88 +254,88 @@ class MITTENS(object):
             for m, nbr_name in enumerate(neighbor_names):
                 neighbor_coord_num = self.coordinate_lut[tuple(coordinate + \
                         neighbor_shifts[nbr_name])]
-                outputs[n,m] = self.one_ahead_funcs[nbr_name](
+                outputs[n,m] = self.doubleODF_funcs[nbr_name](
                         odf, Ypc[neighbor_coord_num], prob_angles)
-        self.one_ahead_results = outputs / np.nansum(outputs, 1)[:,np.newaxis]
+        self.doubleODF_results = outputs / np.nansum(outputs, 1)[:,np.newaxis]
 
         # Calculate the distances
         logger.info("Calculating One-Ahead CoDI")
-        self.one_ahead_codi = aitchison_distance(self.one_ahead_null_probs, self.one_ahead_results)
+        self.doubleODF_codi = aitchison_distance(self.doubleODF_null_probs, self.doubleODF_results)
 
         # Divide the Columns into two matrices, calculate asymmetry
         half1 = []
         half2 = []
         for a,b in opposites:
-            half1.append(self.one_ahead_results[:,neighbor_names.index(a)])
-            half2.append(self.one_ahead_results[:,neighbor_names.index(b)])
+            half1.append(self.doubleODF_results[:,neighbor_names.index(a)])
+            half2.append(self.doubleODF_results[:,neighbor_names.index(b)])
         half1 = np.column_stack(half1)
         half2 = np.column_stack(half2)
         logger.info("Calculating CoAsy")
-        self.one_ahead_coasy = aitchison_asymmetry(half1, half2)
+        self.doubleODF_coasy = aitchison_asymmetry(half1, half2)
 
         # Write outputs if requested
         if output_prefix:
             logger.info("Writing One-Ahead results")
             for n,nbr  in enumerate(neighbor_names):
-                outf = output_prefix + "_one_ahead_%s_prob.nii.gz" % (nbr)
+                outf = output_prefix + "_doubleODF_%s_prob.nii.gz" % (nbr)
                 logger.info("Writing %s", outf)
-                self.save_nifti(self.one_ahead_results[:,n], outf)
-            self.save_nifti(self.one_ahead_codi, output_prefix + "_one_ahead_CoDI.nii.gz")
-            self.save_nifti(self.one_ahead_coasy, output_prefix + "_one_ahead_CoAsy.nii.gz")
-            self.save_nifti(self.one_ahead_results[:,-1], output_prefix + "_one_ahead_p_not_trackable.nii.gz")
+                self.save_nifti(self.doubleODF_results[:,n], outf)
+            self.save_nifti(self.doubleODF_codi, output_prefix + "_doubleODF_CoDI.nii.gz")
+            self.save_nifti(self.doubleODF_coasy, output_prefix + "_doubleODF_CoAsy.nii.gz")
+            self.save_nifti(self.doubleODF_results[:,-1], output_prefix + "_doubleODF_p_not_trackable.nii.gz")
 
     def _load_niftis(self,input_prefix):
-        logger.info("Loading none_ahead results")
-        none_ahead_data = []
+        logger.info("Loading singleODF results")
+        singleODF_data = []
         for a in neighbor_names:
-            outf = input_prefix + "_none_ahead_%s_prob.nii.gz" % a
+            outf = input_prefix + "_singleODF_%s_prob.nii.gz" % a
             if not op.exists(outf):
                 raise ValueError("Unable to load from niftis, can't find %s", outf)
             logger.info("Loading %s", outf)
             # Assumes niftis were written by MITTENS
-            none_ahead_data.append(nib.load(outf).get_data()[::-1,::-1,:].flatten(order="F"))
-        none_ahead_data = np.column_stack(none_ahead_data)
+            singleODF_data.append(nib.load(outf).get_data()[::-1,::-1,:].flatten(order="F"))
+        singleODF_data = np.column_stack(singleODF_data)
 
         self.volume_grid = nib.load(outf).shape
 
         # Use the mask from the fib file 
         if self.flat_mask is None:
             logger.warn("Data mask estimated from NIfTI, not fib")
-            self.flat_mask = none_ahead_data.sum(1) > 0
+            self.flat_mask = singleODF_data.sum(1) > 0
             self.nvoxels = self.flat_mask.sum()
             self.voxel_coords = np.array(np.unravel_index(
                 np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
             self.coordinate_lut = dict(
                 [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
-        none_ahead_data = none_ahead_data[self.flat_mask]
-        self.none_ahead_results = none_ahead_data
+        singleODF_data = singleODF_data[self.flat_mask]
+        self.singleODF_results = singleODF_data
 
         def load_masked_nifti(nifti):
             return nib.load(nifti).get_data()[::-1,::-1,:].flatten(order="F")[self.flat_mask]
 
-        self.none_ahead_codi = load_masked_nifti( input_prefix + "_none_ahead_CoDI.nii.gz")
+        self.singleODF_codi = load_masked_nifti( input_prefix + "_singleODF_CoDI.nii.gz")
 
-        logger.info("Reading one_ahead results")
-        one_ahead_data = np.zeros_like(self.none_ahead_results)
+        logger.info("Reading doubleODF results")
+        doubleODF_data = np.zeros_like(self.singleODF_results)
         for n,nbr  in enumerate(neighbor_names):
-            outf = input_prefix + "_one_ahead_%s_prob.nii.gz" % nbr
+            outf = input_prefix + "_doubleODF_%s_prob.nii.gz" % nbr
             if not op.exists(outf):
                 raise ValueError("Unable to load from niftis, can't find %s", outf)
             logger.info("Loading %s", outf)
-            one_ahead_data[:,n] = load_masked_nifti(outf)
-        self.one_ahead_results = one_ahead_data
-        self.one_ahead_codi = load_masked_nifti(input_prefix + "_one_ahead_CoDI.nii.gz")
-        self.one_ahead_coasy = load_masked_nifti(input_prefix + "_one_ahead_CoAsy.nii.gz")
+            doubleODF_data[:,n] = load_masked_nifti(outf)
+        self.doubleODF_results = doubleODF_data
+        self.doubleODF_codi = load_masked_nifti(input_prefix + "_doubleODF_CoDI.nii.gz")
+        self.doubleODF_coasy = load_masked_nifti(input_prefix + "_doubleODF_CoAsy.nii.gz")
 
-    def build_graph(self,one_ahead=True, weighting_scheme="negative_log_p"):
+    def build_graph(self,doubleODF=True, weighting_scheme="negative_log_p"):
         G = networkit.graph.Graph(self.nvoxels, weighted=True, directed=True)
         self.weighting_scheme = weighting_scheme
-        if one_ahead:
-            prob_mat = self.one_ahead_results
-            null_p = self.one_ahead_null_probs
+        if doubleODF:
+            prob_mat = self.doubleODF_results
+            null_p = self.doubleODF_null_probs
         else:
-            prob_mat = self.none_ahead_results
-            null_p = self.none_ahead_null_probs
+            prob_mat = self.singleODF_results
+            null_p = self.singleODF_null_probs
 
         def weighting_func(probs):
             if weighting_scheme == "negative_log_p":

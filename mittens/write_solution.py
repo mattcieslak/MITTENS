@@ -5,7 +5,7 @@ import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
 
-none_ahead_header= """
+singleODF_header= """
 
 subroutine %s_prob(X, G, P)
        implicit none
@@ -16,7 +16,7 @@ subroutine %s_prob(X, G, P)
 
 """ 
 
-one_ahead_header= """
+doubleODF_header= """
 
 subroutine %s_prob(X, Y, G, P)
        implicit none
@@ -71,7 +71,7 @@ def write_files(odf_order, angle_max, step_size):
     N = unique_verts - 1
 
     # Convert turning angle sequences into fortran code
-    def none_ahead_to_fortran(path, weight):
+    def singleODF_to_fortran(path, weight):
         if weight == 0: return ""
         #Determine the probability of taking that particular sequence of angles 
         first_step = path[-1] if len(path) == 2 else path[0]
@@ -94,7 +94,7 @@ def write_files(odf_order, angle_max, step_size):
 
         return "\n".join(lines) 
 
-    def one_ahead_to_fortran(path, weight):
+    def doubleODF_to_fortran(path, weight):
         if weight == 0: return ""
 
         #Determine the probability of taking that particular sequence of angles 
@@ -124,35 +124,35 @@ def write_files(odf_order, angle_max, step_size):
     txt_step_size = txt_step_size.replace(".","_") # No periods in module names
     suffix = "_%s_ss%s_am%d.f90" % (odf_order,txt_step_size,angle_max)
 
-    one_ahead_file = open("one_ahead" + suffix, "w")
-    none_ahead_file = open("none_ahead" + suffix, "w")
+    doubleODF_file = open("doubleODF" + suffix, "w")
+    singleODF_file = open("singleODF" + suffix, "w")
 
     for target_code in tqdm(list(neighbor_targets.keys())):
         print("Solving for ", target_code)
         # Write the function definition
-        one_ahead_file.write(one_ahead_header % (target_code,N,N,N,N))
-        none_ahead_file.write(none_ahead_header % (target_code,N,N,N))
+        doubleODF_file.write(doubleODF_header % (target_code,N,N,N,N))
+        singleODF_file.write(singleODF_header % (target_code,N,N,N))
         
         all_expressions = {}
         for starting_direction in tqdm(range(all_verts)):
             all_expressions.update( get_expressions(odf_order, angle_max, step_size,
                 target_code, starting_direction))
 
-        none_ahead_exprs = []
-        one_ahead_exprs = []
+        singleODF_exprs = []
+        doubleODF_exprs = []
         for k,v in all_expressions.items():
             if v == 0: continue
-            none_ahead_exprs.append(none_ahead_to_fortran(k,v))
-            one_ahead_exprs.append(one_ahead_to_fortran(k,v))
+            singleODF_exprs.append(singleODF_to_fortran(k,v))
+            doubleODF_exprs.append(doubleODF_to_fortran(k,v))
 
         # Write out the expressions to files
-        for na_expr in none_ahead_exprs:
-            none_ahead_file.write(na_expr+"\n")
-        none_ahead_file.write("end subroutine\n\n\n\n")
-        for expr in one_ahead_exprs:
-            one_ahead_file.write(expr+"\n")
-        one_ahead_file.write("end subroutine\n\n\n\n")
-    one_ahead_file.close()
-    none_ahead_file.close()
+        for na_expr in singleODF_exprs:
+            singleODF_file.write(na_expr+"\n")
+        singleODF_file.write("end subroutine\n\n\n\n")
+        for expr in doubleODF_exprs:
+            doubleODF_file.write(expr+"\n")
+        doubleODF_file.write("end subroutine\n\n\n\n")
+    doubleODF_file.close()
+    singleODF_file.close()
 
 
