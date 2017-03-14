@@ -45,7 +45,7 @@ degrees and a step size of 1.0 voxel units (voxels are assumed to be
 isotropic). 
 
 After some calculations you will find 
-``one_ahead_odf8_ss1_00_am35.f90`` and ``none_ahead_odf8_ss1_00_am35.f90``
+``doubleODF_odf8_ss1_00_am35.f90`` and ``singleODF_odf8_ss1_00_am35.f90``
 in the current directory. Move these files into the ``src/`` directory
 and install the package with ``pip``. We recommend using an editable 
 install, which will keep all these files in their current directory:
@@ -95,14 +95,14 @@ From here you can estimate none-ahead or one-ahead, where NIfTI-1 files are
 saved for each neighbor direction:
 
 ```python
->>> mitns.estimate_one_ahead("hcp")
->>> mitns.estimate_none_ahead("hcp")
+>>> mitns.estimate_singleODF("hcp")
+>>> mitns.estimate_doubleODF("hcp")
 ```
 
 You will find the output in the current working directory (unless you specified an 
 absolute path as the argument). There is a single 3D file for each neighbor voxel
-named ``hcp_one_ahead_r_prob.nii.gz``, ``hcp_none_ahead_r_prob.nii.gz``, 
-``hcp_one_ahead_lpi_prob.nii.gz``, etc.  There will also be CoDI and CoAsy output.
+named ``hcp_doubleODF_r_prob.nii.gz``, ``hcp_singleODF_r_prob.nii.gz``, 
+``hcp_doubleODF_lpi_prob.nii.gz``, etc.  There will also be CoDI and CoAsy output.
 Instead of re-running the estimations again, you can create a MITTENS object 
 by specifying the prefix of the NIfTI files written out during estimation.
 
@@ -119,7 +119,7 @@ are weighted by the tract transition expectation from one voxel to another.
 A graph can build directly from MITTENS object.
 
 ```python
->>> mitns.build_graph(one_ahead=True, edge_weights="vs_null")
+>>> mitns.build_graph(doubleODF=True, edge_weights="vs_null")
 ```
 
 
