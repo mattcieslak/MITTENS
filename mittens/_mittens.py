@@ -13,7 +13,8 @@ from .distances import (kl_distance, aitchison_distance, kl_asymmetry,
 import nibabel as nib
 import os.path as op
 import networkit
-
+from heapq import heappush, heappop
+import pickle
 logger = logging.getLogger(__name__)
 opposites = [
     ("r","l"),
@@ -49,6 +50,7 @@ class MITTENS(object):
         self.coordinate_lut = None
         self.label_lut = None
         self.voxel_graph = None
+        self.UMSF = None
         self.atlas_labels = None
         self.weighting_scheme = None
         # From args
@@ -327,7 +329,8 @@ class MITTENS(object):
         self.doubleODF_codi = load_masked_nifti(input_prefix + "_doubleODF_CoDI.nii.gz")
         self.doubleODF_coasy = load_masked_nifti(input_prefix + "_doubleODF_CoAsy.nii.gz")
 
-    def build_graph(self,doubleODF=True, weighting_scheme="negative_log_p"):
+    def build_graph(self,doubleODF=True, weighting_scheme="minus_iso"):
+
         G = networkit.graph.Graph(self.nvoxels, weighted=True, directed=True)
         self.weighting_scheme = weighting_scheme
         if doubleODF:
@@ -340,7 +343,14 @@ class MITTENS(object):
         def weighting_func(probs):
             if weighting_scheme == "negative_log_p":
                 probs = probs
-            elif weighting_scheme == "sharpen":
+            elif weighting_scheme == "minus_iso":
+                probs = probs - null_p
+                low = probs == 0
+                probs[low] = 0 
+                probs = probs/np.linalg.norm(probs)
+            else:
+                raise NotImplementedError("Unknown Weighting Scheme")
+            '''elif weighting_scheme == "sharpen":
                 scaled_probs = probs/null_p
                 probs = scaled_probs/np.linalg.norm(scaled_probs)
             elif weighting_scheme == "ratio":
@@ -352,8 +362,13 @@ class MITTENS(object):
                 high_array_indices = probs > 1
                 probs[high_array_indices] = 1 
                 probs = probs/np.linalg.norm(probs)
-            else:
-                raise NotImplementedError("Unknown weighting scheme")
+            elif weighting_scheme == "norm_ratio_no_cutoff":
+                probs = probs/max(null_p)
+                probs = probs/np.linalg.norm(probs)
+            elif weighting_scheme == "norm_ratio_extreme":
+                probs = probs/max(null_p)
+                probs = probs**2
+                probs = probs/np.linalg.norm(probs)'''
             return -np.log(probs)
                 
 
@@ -362,8 +377,11 @@ class MITTENS(object):
             probs = weighting_func(prob_mat[j])
             for i, name in enumerate(neighbor_names):
                 coord = starting_voxel + ras_neighbor_shifts[name]
-                if tuple(coord) in self.coordinate_lut:
-                    G.addEdge(j, int(self.coordinate_lut[tuple(coord)]), w = probs[i])
+                if tuple(coord) in self.coordinate_lut and not np.isnan(probs[i]):
+                    if (np.isfinite(probs[i])):
+                        G.addEdge(j, int(self.coordinate_lut[tuple(coord)]), w = probs[i])
+                    else:
+                        G.addEdge(j, int(self.coordinate_lut[tuple(coord)]), w=10000)
         self.voxel_graph = G
 
     def add_atlas(self, atlas_nifti, min_voxels=1):
@@ -399,8 +417,130 @@ class MITTENS(object):
             for connected_node in connected_nodes:
                 self.voxel_graph.addEdge(label_node,connected_node,w=0)
                 self.voxel_graph.addEdge(connected_node,label_node,w=0)'''
+    def Dijkstra(self, g, source, sink):
+        d = networkit.graph.Dijkstra(g, source, target = sink)
+        d.run()
+        path = d.getPath(sink)
+        return path 
+
+    def bottleneck(self, g, source, sink):
+        queue = [(0, source)]
+        dist = {}
+        dist[source] = 0 
+        prev = {}
+        while queue:
+            path_len, v = heappop(queue)
+            if v == sink:
+                break 
+            for n in g.neighbors(v):
+                alt = max(path_len, g.weight(v,n))
+                if (not n in dist or alt < dist[n]):
+                    dist[n] = alt
+                    prev[n] = v
+                    heappush(queue, (dist[n], n))
+        #Now get the path to the sink 
+        path = [sink]
+        n = sink
+        while (n != source):
+            n = prev[n]
+            path.append(n)
+        return path 
             
-    def query_region_pair(self, from_id, to_id, n_paths=1, write_trk="",
+
+    def set_sink(self,g, to_id):
+        connected_nodes = np.flatnonzero(self.atlas_labels == to_id)
+        if (to_id in self.label_lut):
+            label_node = self.label_lut[to_id]
+        else:
+            g.addNode()
+            label_node = g.numberOfNodes() - 1
+            self.label_lut[to_id] = label_node
+        for connected_node in connected_nodes:
+            if (g.hasEdge(label_node, connected_node)):
+                g.removeEdge(label_node, connected_node)
+            g.addEdge(connected_node,label_node, w=0)
+
+    def get_prob(self, g, path):
+        prob = 1 
+        for step in range(len(path) - 1):
+            prob*=np.e**(-g.weight(path[step], path[step+1]))
+        return prob
+
+    def get_weighted_score(self, g, path):
+        prob = self.get_prob(g, path)
+        prob = prob ** (1./len(path))
+        return prob
+
+
+    def voxel_to_region_connectivity(self, from_id, to_id, write_trk="", write_prob=""):
+        if self.voxel_graph is None:
+            raise ValueError("Construct a voxel graph first")
+        if self.label_lut is None:
+            raise ValueError("No atlas information")
+
+ 
+        self.set_sink(self.voxel_graph,to_id)
+        source_nodes = np.flatnonzero(self.atlas_labels == from_id)
+        paths = []
+        for node in tqdm(source_nodes):
+            if self.voxel_graph.neighbors(node):
+                path = self.Dijkstra(self.voxel_graph, node, self.label_lut[to_id])
+                paths.append([path, self.get_weighted_score(self.voxel_graph, path)])
+        g = open('%s_%s_%s_probs.txt'%(write_prob, from_id, to_id), 'w')
+        for path in paths:
+            trk_paths_region = []
+            g.write(str(path[-1]) + '\n')
+            trk_paths.append((self.voxel_coords[np.array(path[0][0:-1])]*2.0, None, None))
+        g.close()
+        nib.trackvis.write('%s_%s_%s.trk.gz'%(write_trk, from_id, to_id), trk_paths, hdr )
+        return paths
+    
+    def corticol_ribbon_to_thalamus(self, cortical_nifti, write_trk ="", write_prob = ""):
+        if self.voxel_graph is None:
+            raise ValueError("Construct a voxel graph first")
+        if self.label_lut is None:
+            raise ValueError("No atlas information")
+
+        cortical_img = nib.load(cortical_nifti)
+        if not cortical_img.shape[0] == self.volume_grid[0] and \
+               cortical_img.shape[1] == self.volume_grid[1] and \
+               cortical_img.shape[2] == self.volume_grid[2]:
+            raise ValueError("%s does not match dMRI volume" % cortical_nifti)
+        cortical_data = cortical_img.get_data().astype(np.int)
+        # Convert to LPS+ to match internal coordinates
+        if cortical_img.affine[0,0] > 0:
+            cortical_data = cortical_data[::-1,:,:]
+        if cortical_img.affine[1,1] > 0:
+            cortical_data = cortical_data[:,::-1,:]
+        if cortical_img.affine[2,2] < 0:
+            cortical_data = cortical_data[:,:,::-1]
+        cortical_labels = cortical_data.flatten(order="F")[self.flat_mask]
+        #for each region of the thalamus 
+        thalamus_labels = np.unique(self.atlas_labels[self.atlas_labels >= 6000])
+        thalamus_labels = [label for label in thalamus_labels if label < 7000]
+        source_nodes = np.flatnonzero(cortical_labels == 1)
+        trk_paths = []
+        g = open("%s_cortical_to_thalamus_prob.txt"%(write_prob), "w")
+        for thalamus_region in tqdm(thalamus_labels):
+            paths = []
+            trk_paths_region = []
+            self.set_sink(self.voxel_graph, thalamus_region)
+            for node in tqdm(source_nodes):
+                if self.voxel_graph.neighbors(node):
+                    path = self.Dijkstra(self.voxel_graph, node, self.label_lut[thalamus_region])
+                    paths.append([path, self.get_weighted_score(self.voxel_graph, path)])
+                    trk_paths.append((self.voxel_coords[np.array(path[0:-1])]*2.0, None, None))
+                    trk_paths_region.append((self.voxel_coords[np.array(path[0:-1])]*2.0, None, None))
+                    g.write(str(self.get_weighted_score(self.voxel_graph, path)) + '\n')
+            f = open("cortical_paths_to_%s.pkl"%(thalamus_region), "wb")
+            pickle.dump(paths, f)
+            f.close()
+            nib.trackvis.write("%s_cortical_paths_to_thalamus_region_%s.trk.gz"%(write_trk, thalamus_region), trk_paths_region, hdr)
+        g.close()
+        nib.trackvis.write("%s_cortical_paths_to_thalamus.trk.gz"%(write_trk), trk_paths, hdr)
+            
+
+    '''def query_region_pair(self, from_id, to_id, n_paths=1, write_trk="",
             write_nifti=""):
         if self.voxel_graph is None:
             raise ValueError("Please construct a voxel graph first")
@@ -433,12 +573,6 @@ class MITTENS(object):
                     self.voxel_graph.removeEdge(label_node, connected_node)
                 self.voxel_graph.addEdge(connected_node,label_node, w=0)
 
-        def Dijkstra(g, source, sink):
-            d = networkit.graph.Dijkstra(g, source, storePaths=True, storeStack=False, target = sink)
-            d.run()
-            path = d.getPath(self.label_lut[to_id])
-            return path
-
         def getCost(g, path):
             cost = 0 
             for i in range(len(path)-1):
@@ -453,7 +587,7 @@ class MITTENS(object):
 
         def YenKSP():
             foundPaths = []
-            shortestPath = Dijkstra(self.voxel_graph, self.label_lut[from_id], self.label_lut[to_id]) 
+            shortestPath = self.Dijkstra(self.voxel_graph, self.label_lut[from_id], self.label_lut[to_id]) 
             cost = getCost(self.voxel_graph, shortestPath)
             foundPaths.append(shortestPath)
             potentialPaths = set()
@@ -482,7 +616,7 @@ class MITTENS(object):
                             graph_copy.forInEdgesOf(rootNode, callbackIn)
 
 
-                    spurPath = Dijkstra(graph_copy, spurNode, self.label_lut[to_id])
+                    spurPath = self.Dijkstra(graph_copy, spurNode, self.label_lut[to_id])
                     totalPath = []
                     for n in rootPath:
                         totalPath.append(n)
@@ -508,7 +642,24 @@ class MITTENS(object):
             trk_paths = []
             for path in paths:
                 trk_paths.append((self.voxel_coords[np.array(path[1:-1])]*2.0, None, None))
-            nib.trackvis.write('%s_%s_%s_%s_%s.trk.gz'%(write_trk, from_id, to_id, self.weighting_scheme,n_paths), trk_paths, hdr )
+            nib.trackvis.write('%s_%s_%s_%s_%s.trk.gz'%(write_trk, from_id, to_id, self.weighting_scheme,n_paths), trk_paths, hdr )'''
+
+    def get_maximum_spanning_forest(self):
+        forest = networkit.graph.UnionMaximumSpanningForest(self.voxel_graph)
+        forest.run()
+        self.UMSF = forest.getUMSF()
+
+    def voxel_region_bottleneck(self, from_id, to_id):
+        self.set_sink(self.voxel_graph, to_id)
+        source_nodes = np.flatnonzero(self.atlas_labels == from_id)
+        paths = []
+        for node in tqdm(source_nodes):
+            if self.voxel_graph.neighbors(node):
+                path = self.bottleneck(self.voxel_graph, node, self.label_lut[to_id])
+                paths.append(path)
+        pickle.dump(paths, open("bottleneck_paths_201_7002.pkl","wb"))
+        return paths
+
 
     def calculate_connectivity_matrices(self,opts):
         """
