@@ -446,6 +446,12 @@ class MITTENS(object):
             path.append(n)
         return path 
             
+    def set_sink_using_nift(self, g, connected_nodes):
+        g.addNode()
+        label_node = g.numberOfNodes()-1
+        for node in connected_nodes:
+            g.addEdge(node, label_node, w=0)
+        return label_node
 
     def set_sink(self,g, to_id):
         connected_nodes = np.flatnonzero(self.atlas_labels == to_id)
@@ -471,7 +477,11 @@ class MITTENS(object):
         prob = prob ** (1./len(path))
         return prob
 
-
+    def region_to_region_paths(self, from_nifti, to_nifti, write_trk="", write_prob=""):
+        if self.voxel_graph is None:
+            self.build_graph()
+        
+         
     def voxel_to_region_connectivity(self, from_id, to_id, write_trk="", write_prob=""):
         if self.voxel_graph is None:
             raise ValueError("Construct a voxel graph first")
@@ -495,6 +505,38 @@ class MITTENS(object):
         nib.trackvis.write('%s_%s_%s.trk.gz'%(write_trk, from_id, to_id), trk_paths, hdr )
         return paths
     
+    def region_to_region_paths(self, from_nifti, to_nifti, write_trk="", write_prob=""):
+        if self.voxel_graph is None:
+            self.build_graph()
+        source_img = nib.load(from_nifti)
+        if not source_img.shape[0] == self.volume_grid[0] and \
+                source_img.shape[1] == self.volume_grid[1] and \
+                source_img.shape[2] == self.volume_grid[2]:
+           raise ValueError("%s does not match dMRI volume" % source_nifti)
+        source_data = source_img.get_data().astype(np.int)
+        source_labels = source_data.flatten(order="F")[self.flat_mask]
+        source_nodes = np.nonzero[source_labels==1] 
+        sink_img = nib.load(to_nifti)
+         
+        sink_img = nib.load(to_nifti)
+        if not sink_img.shape[0] == self.volume_grid[0] and \
+                sink_img.shape[1] == self.volume_grid[1] and \
+                sink_img.shape[2] == self.volume_grid[2]:
+           raise ValueError("%s does not match dMRI volume" % sink_nifti)
+        sink_data = sink_img.get_data().astype(np.int)
+        sink_labels = sink_data.flatten(order="F")[self.flat_mask]
+        sink_nodes = np.nonzero[sink_labels==1]
+        sink_label_node = self.set_sink_from_nifit(self.voxel_graph, sink_nodes)
+        g = open("%s_to_%s_%s"%(from_nifti, to_nifti, write_trk), "wb")
+        trk_paths = []  
+        for node in tqdm(source_nodes):
+            if self.voxel_graph.neighbors(node):
+                path = self.Dijkstra(self.voxel_graph, node, sink_label_node)
+                g.write(self.get_weighted_score(self.voxel_graph, path))
+                trk_paths.append((self.voxel_coords[np.array(path[0:-1])]*2.0, None, None))
+        g.close()
+        nib.trackvis.write('%s_to_%s_%s.trk.gz'%(from_nifti, to_nifit, write_trk), trk_paths, hdr )
+        
     def corticol_ribbon_to_thalamus(self, cortical_nifti, write_trk ="", write_prob = ""):
         if self.voxel_graph is None:
             raise ValueError("Construct a voxel graph first")
@@ -540,109 +582,6 @@ class MITTENS(object):
         nib.trackvis.write("%s_cortical_paths_to_thalamus.trk.gz"%(write_trk), trk_paths, hdr)
             
 
-    '''def query_region_pair(self, from_id, to_id, n_paths=1, write_trk="",
-            write_nifti=""):
-        if self.voxel_graph is None:
-            raise ValueError("Please construct a voxel graph first")
-        if self.label_lut is None:
-            raise ValueError("No atlas information found")
-        def set_source():
-            connected_nodes = np.flatnonzero(self.atlas_labels == from_id)
-            if (from_id in self.label_lut):
-                label_node = self.label_lut[from_id]
-            else:
-                self.voxel_graph.addNode()
-                label_node = self.voxel_graph.numberOfNodes() - 1 
-                self.label_lut[from_id] = label_node
-            for connected_node in connected_nodes:
-                #be sure to remove any edges from when from_id was set to a sink
-                if (self.voxel_graph.hasEdge(connected_node, label_node)):
-                    self.voxel_graph.removeEdge(connected_node, label_node)
-                self.voxel_graph.addEdge(label_node, connected_node, w=0)
-
-        def set_sink():
-            connected_nodes = np.flatnonzero(self.atlas_labels == to_id)
-            if (to_id in self.label_lut):
-                label_node = self.label_lut[to_id]
-            else:
-                self.voxel_graph.addNode()
-                label_node = self.voxel_graph.numberOfNodes() - 1
-                self.label_lut[to_id] = label_node
-            for connected_node in connected_nodes:
-                if (self.voxel_graph.hasEdge(label_node, connected_node)):
-                    self.voxel_graph.removeEdge(label_node, connected_node)
-                self.voxel_graph.addEdge(connected_node,label_node, w=0)
-
-        def getCost(g, path):
-            cost = 0 
-            for i in range(len(path)-1):
-                cost += g.weight(path[i], path[i+1])
-            return cost
-
-        def getProbability(g, path):
-            prob = 1
-            for i in range(len(path) -1):
-                prob*=np.e**(-g.weight(path[i], path[i+1]))
-            return prob 
-
-        def YenKSP():
-            foundPaths = []
-            shortestPath = self.Dijkstra(self.voxel_graph, self.label_lut[from_id], self.label_lut[to_id]) 
-            cost = getCost(self.voxel_graph, shortestPath)
-            foundPaths.append(shortestPath)
-            potentialPaths = set()
-            graph_copy = networkit.graph.Graph(self.voxel_graph, weighted=True, directed=True)
-            for k in range(1,n_paths):
-                for i in range(0, len(foundPaths[-1]) - 2):
-                    removedEdges = []
-                    spurNode = foundPaths[k-1][i]
-                    rootPath = foundPaths[k-1][0:i+1]
-                    for path in foundPaths:
-                        if (rootPath == path[0:i+1]):
-                            if (graph_copy.hasEdge(path[i], path[i+1])):
-                                w = graph_copy.weight(path[i], path[i+1])
-                                graph_copy.removeEdge(path[i], path[i+1])
-                                removedEdges.append([path[i], path[i+1],w])
-                    def callbackOut(u, v, weight, edge_id):
-                        removedEdges.append([u,v,weight])
-                        graph_copy.removeEdge(u,v)
-                    def callbackIn(u, v, weight, edge_id):
-                        removedEdges.append([v,u,weight])
-                        graph_copy.removeEdge(v, u)
-
-                    for rootNode in rootPath:
-                        if (rootNode != spurNode):
-                            graph_copy.forEdgesOf(rootNode, callbackOut)
-                            graph_copy.forInEdgesOf(rootNode, callbackIn)
-
-
-                    spurPath = self.Dijkstra(graph_copy, spurNode, self.label_lut[to_id])
-                    totalPath = []
-                    for n in rootPath:
-                        totalPath.append(n)
-                    for n in spurPath[1:]:
-                        totalPath.append(n)
-                    cost = getCost(self.voxel_graph, totalPath)
-                    potentialPaths.add(tuple(totalPath) + (cost,))
-                    for e in removedEdges:
-                        graph_copy.addEdge(e[0], e[1], w=e[2])
-                if (not potentialPaths):
-                    break
-                potentialPaths = list(potentialPaths)
-                potentialPaths.sort(key = lambda x:x[-1])
-                foundPaths.append(potentialPaths[0][0:-1])
-                potentialPaths.remove(potentialPaths[0])
-                potentialPaths = set(potentialPaths)
-            return foundPaths
-
-        set_source()
-        set_sink()
-        paths = YenKSP()
-        if (not (write_trk == "")):
-            trk_paths = []
-            for path in paths:
-                trk_paths.append((self.voxel_coords[np.array(path[1:-1])]*2.0, None, None))
-            nib.trackvis.write('%s_%s_%s_%s_%s.trk.gz'%(write_trk, from_id, to_id, self.weighting_scheme,n_paths), trk_paths, hdr )'''
 
     def get_maximum_spanning_forest(self):
         forest = networkit.graph.UnionMaximumSpanningForest(self.voxel_graph)
