@@ -446,7 +446,7 @@ class MITTENS(object):
             path.append(n)
         return path 
             
-    def set_sink_using_nift(self, g, connected_nodes):
+    def set_sink_using_nifti(self, g, connected_nodes):
         g.addNode()
         label_node = g.numberOfNodes()-1
         for node in connected_nodes:
@@ -515,7 +515,7 @@ class MITTENS(object):
            raise ValueError("%s does not match dMRI volume" % source_nifti)
         source_data = source_img.get_data().astype(np.int)
         source_labels = source_data.flatten(order="F")[self.flat_mask]
-        source_nodes = np.nonzero[source_labels==1] 
+        source_nodes = np.flatnonzero(source_labels==1)
         sink_img = nib.load(to_nifti)
          
         sink_img = nib.load(to_nifti)
@@ -525,14 +525,14 @@ class MITTENS(object):
            raise ValueError("%s does not match dMRI volume" % sink_nifti)
         sink_data = sink_img.get_data().astype(np.int)
         sink_labels = sink_data.flatten(order="F")[self.flat_mask]
-        sink_nodes = np.nonzero[sink_labels==1]
-        sink_label_node = self.set_sink_from_nifit(self.voxel_graph, sink_nodes)
-        g = open("%s_to_%s_%s"%(from_nifti, to_nifti, write_trk), "wb")
+        sink_nodes = np.flatnonzero(sink_labels==1)
+        sink_label_node = self.set_sink_using_nifti(self.voxel_graph, sink_nodes)
+        g = open("%s_to_%s_%s"%(from_nifti, to_nifti, write_trk), "w")
         trk_paths = []  
         for node in tqdm(source_nodes):
             if self.voxel_graph.neighbors(node):
                 path = self.Dijkstra(self.voxel_graph, node, sink_label_node)
-                g.write(self.get_weighted_score(self.voxel_graph, path))
+                g.write(str(self.get_weighted_score(self.voxel_graph, path))+'\n')
                 trk_paths.append((self.voxel_coords[np.array(path[0:-1])]*2.0, None, None))
         g.close()
         nib.trackvis.write('%s_to_%s_%s.trk.gz'%(from_nifti, to_nifit, write_trk), trk_paths, hdr )
