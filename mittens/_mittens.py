@@ -83,6 +83,7 @@ class MITTENS(object):
         # These will get filled out from loading a fibgz or niftis
         self.flat_mask = None
         self.nvoxels = None
+        self.voxel_size = None
         self.voxel_coords = None
         self.coordinate_lut = None
         self.label_lut = None
@@ -169,6 +170,7 @@ class MITTENS(object):
         # DSI Studio stores data in LPS+
         #aff = aff * np.array([-1,-1,1,1])
         self.ras_affine = np.diag(aff)
+        self.voxel_size = aff
 
         # Coordinate mapping information from fib file
         self.flat_mask = f["fa0"].squeeze() > 0
@@ -192,6 +194,55 @@ class MITTENS(object):
         self.odf_values = np.row_stack(valid_odfs).astype(np.float64)
         self.odf_values = self.odf_values / self.odf_values.sum(1)[:,np.newaxis] * 0.5
         logger.info("Loaded ODF data: %s",str(self.odf_values.shape))
+
+    def _load_niftis(self,input_prefix):
+        logger.info("Loading singleODF results")
+        singleODF_data = []
+        for a in neighbor_names:
+            outf = input_prefix + "_singleODF_%s_prob.nii.gz" % a
+            if not op.exists(outf):
+                raise ValueError("Unable to load from niftis, can't find %s", outf)
+            logger.info("Loading %s", outf)
+            # Assumes niftis were written by MITTENS
+            tmp_img = nib.load(outf)
+            if any([tmp_img.affine[0,0] < 0, tmp_img.affine[1,1] < 0, 
+                tmp_img.affine[2,2] < 0]):
+                logger.warn("NIfTI may not have come from MITTENS.")
+            singleODF_data.append(tmp_img.get_data()[::-1,::-1,:].flatten(order="F"))
+        singleODF_data = np.column_stack(singleODF_data)
+
+        final_img = nib.load(outf)
+        self.volume_grid = final_img.shape
+        self.voxel_size = np.abs(np.diag(final_img.affine)[:3])
+
+        # Use the mask from the fib file 
+        if self.flat_mask is None:
+            logger.warn("Data mask estimated from NIfTI, not fib")
+            self.flat_mask = singleODF_data.sum(1) > 0
+            self.nvoxels = self.flat_mask.sum()
+            self.voxel_coords = np.array(np.unravel_index(
+                np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
+            self.coordinate_lut = dict(
+                [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
+        singleODF_data = singleODF_data[self.flat_mask]
+        self.singleODF_results = singleODF_data
+
+        def load_masked_nifti(nifti):
+            return nib.load(nifti).get_data()[::-1,::-1,:].flatten(order="F")[self.flat_mask]
+
+        self.singleODF_codi = load_masked_nifti( input_prefix + "_singleODF_CoDI.nii.gz")
+
+        logger.info("Reading doubleODF results")
+        doubleODF_data = np.zeros_like(self.singleODF_results)
+        for n,nbr  in enumerate(neighbor_names):
+            outf = input_prefix + "_doubleODF_%s_prob.nii.gz" % nbr
+            if not op.exists(outf):
+                raise ValueError("Unable to load from niftis, can't find %s", outf)
+            logger.info("Loading %s", outf)
+            doubleODF_data[:,n] = load_masked_nifti(outf)
+        self.doubleODF_results = doubleODF_data
+        self.doubleODF_codi = load_masked_nifti(input_prefix + "_doubleODF_CoDI.nii.gz")
+        self.doubleODF_coasy = load_masked_nifti(input_prefix + "_doubleODF_CoAsy.nii.gz")
 
     def get_prob_funcs(self, order="singleODF"):
 
@@ -304,7 +355,8 @@ class MITTENS(object):
 
         # Calculate the distances
         logger.info("Calculating One-Ahead CoDI")
-        self.doubleODF_codi = aitchison_distance(self.doubleODF_null_probs, self.doubleODF_results)
+        self.doubleODF_codi = aitchison_distance(self.doubleODF_null_probs, 
+                self.doubleODF_results)
 
         # Divide the Columns into two matrices, calculate asymmetry
         half1 = []
@@ -327,49 +379,6 @@ class MITTENS(object):
             self.save_nifti(self.doubleODF_codi, output_prefix + "_doubleODF_CoDI.nii.gz")
             self.save_nifti(self.doubleODF_coasy, output_prefix + "_doubleODF_CoAsy.nii.gz")
             self.save_nifti(self.doubleODF_results[:,-1], output_prefix + "_doubleODF_p_not_trackable.nii.gz")
-
-    def _load_niftis(self,input_prefix):
-        logger.info("Loading singleODF results")
-        singleODF_data = []
-        for a in neighbor_names:
-            outf = input_prefix + "_singleODF_%s_prob.nii.gz" % a
-            if not op.exists(outf):
-                raise ValueError("Unable to load from niftis, can't find %s", outf)
-            logger.info("Loading %s", outf)
-            # Assumes niftis were written by MITTENS
-            singleODF_data.append(nib.load(outf).get_data()[::-1,::-1,:].flatten(order="F"))
-        singleODF_data = np.column_stack(singleODF_data)
-
-        self.volume_grid = nib.load(outf).shape
-
-        # Use the mask from the fib file 
-        if self.flat_mask is None:
-            logger.warn("Data mask estimated from NIfTI, not fib")
-            self.flat_mask = singleODF_data.sum(1) > 0
-            self.nvoxels = self.flat_mask.sum()
-            self.voxel_coords = np.array(np.unravel_index(
-                np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
-            self.coordinate_lut = dict(
-                [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
-        singleODF_data = singleODF_data[self.flat_mask]
-        self.singleODF_results = singleODF_data
-
-        def load_masked_nifti(nifti):
-            return nib.load(nifti).get_data()[::-1,::-1,:].flatten(order="F")[self.flat_mask]
-
-        self.singleODF_codi = load_masked_nifti( input_prefix + "_singleODF_CoDI.nii.gz")
-
-        logger.info("Reading doubleODF results")
-        doubleODF_data = np.zeros_like(self.singleODF_results)
-        for n,nbr  in enumerate(neighbor_names):
-            outf = input_prefix + "_doubleODF_%s_prob.nii.gz" % nbr
-            if not op.exists(outf):
-                raise ValueError("Unable to load from niftis, can't find %s", outf)
-            logger.info("Loading %s", outf)
-            doubleODF_data[:,n] = load_masked_nifti(outf)
-        self.doubleODF_results = doubleODF_data
-        self.doubleODF_codi = load_masked_nifti(input_prefix + "_doubleODF_CoDI.nii.gz")
-        self.doubleODF_coasy = load_masked_nifti(input_prefix + "_doubleODF_CoAsy.nii.gz")
 
     def build_graph(self, doubleODF=True, weighting_scheme="minus_iso"):
 
@@ -495,11 +504,6 @@ class MITTENS(object):
         prob = prob ** (1./len(path))
         return prob
 
-    def region_to_region_paths(self, from_nifti, to_nifti, write_trk="", write_prob=""):
-        if self.voxel_graph is None:
-            self.build_graph()
-        
-         
     def voxel_to_region_connectivity(self, from_id, to_id, write_trk="", write_prob=""):
         if self.voxel_graph is None:
             raise ValueError("Construct a voxel graph first")
@@ -548,6 +552,7 @@ class MITTENS(object):
             raise ValueError("No mask is available")
 
         # Check for compatible shapes
+        logger.info("Loading NIfTI Image %s", nifti_file)
         img = nib.load(nifti_file)
         if not img.shape[0] == self.volume_grid[0] and \
                img.shape[1] == self.volume_grid[1] and \
@@ -568,78 +573,79 @@ class MITTENS(object):
             logger.info("Flipped Z in %s", nifti_file)
         return data.flatten(order="F")[self.flat_mask]
 
-    
-    def region_to_region_paths(self, from_nifti, to_nifti, write_trk="", write_prob=""):
-        if self.voxel_graph is None:
-            self.build_graph()
-        source_labels = self._oriented_nifti_data(from_nifti)
-        source_nodes = np.flatnonzero(source_labels==1)
-        sink_img = nib.load(to_nifti)
-         
-        sink_img = nib.load(to_nifti)
-        if not sink_img.shape[0] == self.volume_grid[0] and \
-                sink_img.shape[1] == self.volume_grid[1] and \
-                sink_img.shape[2] == self.volume_grid[2]:
-           raise ValueError("%s does not match dMRI volume" % sink_nifti)
-        sink_data = sink_img.get_data().astype(np.int)
-        sink_labels = sink_data.flatten(order="F")[self.flat_mask]
-        sink_nodes = np.flatnonzero(sink_labels==1)
-        sink_label_node = self.set_sink_using_nifti(self.voxel_graph, sink_nodes)
-        g = open("%s_to_%s_%s"%(from_nifti, to_nifti, write_trk), "w")
-        trk_paths = []  
-        for node in tqdm(source_nodes):
+    def region_voxels_to_region_query(self, from_region, to_region, write_trk="", 
+            write_prob="", write_nifti=""):
+        """
+        Query paths from one region to another. Parameters ``from_region``
+        and ``to_region`` can be a path to a nifti file or a region ID
+        if an atlas has been added through the ``add_atlas`` function.
+        The probability of being connected to the ``to_region`` is calculated
+        for every voxel in the ``from_region``.
+
+        Parameters:
+        ===========
+
+        from_region:str,int
+          Region from which the probability will be calculated for
+          every voxel along the shortest path to any voxel in the
+          ``to_region``.
+        
+        to_region:str,int
+          The "sink" region. 
+
+        write_trk:str
+          Suffix that will be added to the trackvis output. If empty a 
+          trackvis file won't be written.
+
+        write_prob:str
+          suffix for a txt file that contains the probability for each 
+          path. These files can be loaded into DSI Studio to color the
+          streamlines.
+
+        write_nifti:str
+          Write the probabilities to a NIfTI file. Each voxel in ``from_region``
+          will contain its probability.
+        """
+        # Get lists of nodes for the query
+        def get_region(region):
+            # Find what nodes are part of a region
+            if type(region) is str:
+                labels = self._oriented_nifti_data(region)
+                return np.flatnonzero(labels), op.split(op.abspath(region))[-1]
+            if type(region) in (int, float):
+                nodes = np.flatnonzero(self.atlas_labels==region)
+                return nodes, "region_%05d"%region
+        from_nodes, from_name = get_region(from_region)
+        to_nodes, to_name = get_region(to_region)
+        
+        # Loop over all the voxels in the from_region
+        sink_label_node = self.set_sink_using_nifti(self.voxel_graph, from_nodes)
+        trk_paths = []
+        probs = []
+        for node in tqdm(from_nodes):
             if self.voxel_graph.neighbors(node):
                 path = self.Dijkstra(self.voxel_graph, node, sink_label_node)
-                g.write(str(self.get_weighted_score(self.voxel_graph, path))+'\n')
-                trk_paths.append((self.voxel_coords[np.array(path[0:-1])]*2.0, None, None))
-        g.close()
-        nib.trackvis.write('%s_to_%s_%s.trk.gz'%(from_nifti, to_nifit, write_trk), trk_paths, hdr )
-        
-    def corticol_ribbon_to_thalamus(self, cortical_nifti, write_trk ="", write_prob = ""):
-        if self.voxel_graph is None:
-            raise ValueError("Construct a voxel graph first")
-        if self.label_lut is None:
-            raise ValueError("No atlas information")
+                probs.append(self.get_weighted_score(self.voxel_graph, path))
+                trk_paths.append(
+                        (self.voxel_coords[np.array(path[0:-1])]*self.voxel_size, None, None))
 
-        cortical_img = nib.load(cortical_nifti)
-        if not cortical_img.shape[0] == self.volume_grid[0] and \
-               cortical_img.shape[1] == self.volume_grid[1] and \
-               cortical_img.shape[2] == self.volume_grid[2]:
-            raise ValueError("%s does not match dMRI volume" % cortical_nifti)
-        cortical_data = cortical_img.get_data().astype(np.int)
-        # Convert to LPS+ to match internal coordinates
-        if cortical_img.affine[0,0] > 0:
-            cortical_data = cortical_data[::-1,:,:]
-        if cortical_img.affine[1,1] > 0:
-            cortical_data = cortical_data[:,::-1,:]
-        if cortical_img.affine[2,2] < 0:
-            cortical_data = cortical_data[:,:,::-1]
-        cortical_labels = cortical_data.flatten(order="F")[self.flat_mask]
-        #for each region of the thalamus 
-        thalamus_labels = np.unique(self.atlas_labels[self.atlas_labels >= 6000])
-        thalamus_labels = [label for label in thalamus_labels if label < 7000]
-        source_nodes = np.flatnonzero(cortical_labels == 1)
-        trk_paths = []
-        g = open("%s_cortical_to_thalamus_prob.txt"%(write_prob), "w")
-        for thalamus_region in tqdm(thalamus_labels):
-            paths = []
-            trk_paths_region = []
-            self.set_sink(self.voxel_graph, thalamus_region)
-            for node in tqdm(source_nodes):
-                if self.voxel_graph.neighbors(node):
-                    path = self.Dijkstra(self.voxel_graph, node, self.label_lut[thalamus_region])
-                    paths.append([path, self.get_weighted_score(self.voxel_graph, path)])
-                    trk_paths.append((self.voxel_coords[np.array(path[0:-1])]*2.0, None, None))
-                    trk_paths_region.append((self.voxel_coords[np.array(path[0:-1])]*2.0, None, None))
-                    g.write(str(self.get_weighted_score(self.voxel_graph, path)) + '\n')
-            f = open("cortical_paths_to_%s.pkl"%(thalamus_region), "wb")
-            pickle.dump(paths, f)
-            f.close()
-            nib.trackvis.write("%s_cortical_paths_to_thalamus_region_%s.trk.gz"%(write_trk, thalamus_region), trk_paths_region, hdr)
-        g.close()
-        nib.trackvis.write("%s_cortical_paths_to_thalamus.trk.gz"%(write_trk), trk_paths, hdr)
+        # Write outputs
+        if write_prob:
+            g = open("%s_to_%s_%s.txt"%(from_name, to_name, write_trk), "w")
+            for prob in probs:
+                g.write("%.9f\n"%prob)
+            g.close()
+        if write_trk:
+            nib.trackvis.write('%s_to_%s_%s.trk.gz'%(from_name, to_name, write_trk), 
+                    trk_paths, hdr )
+        if write_nifti:
+            output_probs = np.zeros(self.nvoxels)
+            output_probs[from_nodes] = np.array(probs)
+            self.save_nifti(output_probs, write_nifti)
+
             
-
+        return trk_paths, probs
+        
 
     def get_maximum_spanning_forest(self):
         forest = networkit.graph.UnionMaximumSpanningForest(self.voxel_graph)
