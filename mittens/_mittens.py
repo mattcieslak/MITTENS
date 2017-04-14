@@ -37,9 +37,46 @@ hdr = np.array((b'TRACK', [ 98, 121, 121], [ 2.,  2.,  2.], [ 0.,  0.,  0.], 0, 
 
 
 class MITTENS(object):
-    def __init__(self, fibgz_file="", nifti_prefix="", step_size=np.sqrt(3)/2. , angle_max=35,
-            odf_resolution="odf8", angle_weights="flat",
-            angle_weighting_power=1.):
+    def __init__(self, fibgz_file="", nifti_prefix="", real_affine_image="", 
+            step_size=np.sqrt(3)/2. , angle_max=35, odf_resolution="odf8", 
+            angle_weights="flat", angle_weighting_power=1.):
+        """
+        Represents a voxel graph.  Can be constructed with a DSI Studio ``fib.gz``
+        file or from NIfTI files from a previous run. 
+
+        Parameters:
+        ===========
+
+        fibgz_file:str
+          Path to a dsi studio fib.gz file
+        nifti_prefix:str
+          Prefix used when calculating singleODF and/or doubleODF transition
+          probabilities.
+        real_affine_image:str
+          Path to a NIfTI file that contains the real affine mapping for the
+          data. DSI Studio does not preserve affine mappings. If provided, 
+          all NIfTI outputs will be written with this affine. Otherwise the
+          default affine from DSI Studio will be used.
+        step_size:float
+          Step size in voxel units. Used for calculating transition probabilities
+        angle_max:float
+          Maximum turning angle in degrees. Used for calculating transition 
+          probabilities.
+        odf_resolution:str
+          ODF tesselation used in DSI Studio. Options are {"odf4", "odf6", "odf8"}.
+        angle_weights:str
+          Angle weighting scheme used while calculating transition probabilities
+        angle_weighting_power:float
+          Parameter used when an exponential weighting scheme is selected
+
+
+        Note:
+        =====
+        The combination of odf_resolution, angle_max, angle_weights and angle_weighting
+        power is only available if you have the corresponding Fortran extension module.
+        If you're unable to initialize a MITTENS object with your desired combination,
+        try downloading or generating/compiling the necessary Fortran modules.
+        """
         if fibgz_file == nifti_prefix == "":
             raise ValueError("Must provide either a DSI Studio fib file or prefix to "
                     "NIfTI1 images written out by a previous run")
@@ -78,6 +115,11 @@ class MITTENS(object):
             self._load_niftis(nifti_prefix)
 
         self._initialize_nulls()
+        if real_affine_image:
+            self._set_real_affine(real_affine_image)
+
+    def _set_real_affine(self, affine_img):
+        pass
 
     def _initialize_nulls(self):
 
@@ -86,7 +128,7 @@ class MITTENS(object):
         self.isotropic = np.ones(self.n_unique_vertices,dtype=np.float64) / \
                 self.odf_vertices.shape[0]
         
-        # None-ahead Model
+        # Single ODF Model
         self.singleODF_funcs = self.get_prob_funcs("singleODF")
         singleODF_null_probs = []
         for k in neighbor_names:
@@ -96,7 +138,7 @@ class MITTENS(object):
         #if not self.singleODF_null_probs.sum() == 1.:
         #    raise ValueError("Null probailities do not add up to 1. Check Fortran")
 
-        # One-ahead Model
+        # Double ODF Model
         self.doubleODF_funcs = self.get_prob_funcs("doubleODF")
         doubleODF_null_probs = []
         isotropic_x2 = compute_weights_as_neighbor_voxels(
@@ -329,7 +371,7 @@ class MITTENS(object):
         self.doubleODF_codi = load_masked_nifti(input_prefix + "_doubleODF_CoDI.nii.gz")
         self.doubleODF_coasy = load_masked_nifti(input_prefix + "_doubleODF_CoAsy.nii.gz")
 
-    def build_graph(self,doubleODF=True, weighting_scheme="minus_iso"):
+    def build_graph(self, doubleODF=True, weighting_scheme="minus_iso"):
 
         G = networkit.graph.Graph(self.nvoxels, weighted=True, directed=True)
         self.weighting_scheme = weighting_scheme
@@ -390,33 +432,9 @@ class MITTENS(object):
         """
         if self.label_lut is not None:
             raise NotImplementedError("Cannot add multiple atlases yet")
-        atlas_img = nib.load(atlas_nifti)
-        if not atlas_img.shape[0] == self.volume_grid[0] and \
-               atlas_img.shape[1] == self.volume_grid[1] and \
-               atlas_img.shape[2] == self.volume_grid[2]:
-            raise ValueError("%s does not match dMRI volume" % atlas_nifti)
-        atlas_data = atlas_img.get_data().astype(np.int)
-        # Convert to LPS+ to match internal coordinates
-        if atlas_img.affine[0,0] > 0:
-            atlas_data = atlas_data[::-1,:,:]
-        if atlas_img.affine[1,1] > 0:
-            atlas_data = atlas_data[:,::-1,:]
-        if atlas_img.affine[2,2] < 0:
-            atlas_data = atlas_data[:,:,::-1]
-        #This will need to be accessed from the graph query function
-        self.atlas_labels = atlas_data.flatten(order="F")[self.flat_mask]
+        self.atlas_labels = self._oriented_nifti_data(atlas_nifti)
         self.label_lut = {}
-        # Add connections between a "label" node and 
-        '''self.label_lut = {}
-        for label in np.unique(atlas_labels):
-            connected_nodes = np.flatnonzero(atlas_labels == label)
-            if len(connected_nodes) < min_voxels: continue
-            self.voxel_graph.addNode()
-            label_node = self.voxel_graph.numberOfNodes() - 1
-            self.label_lut[label] = label_node
-            for connected_node in connected_nodes:
-                self.voxel_graph.addEdge(label_node,connected_node,w=0)
-                self.voxel_graph.addEdge(connected_node,label_node,w=0)'''
+
     def Dijkstra(self, g, source, sink):
         d = networkit.graph.Dijkstra(g, source, target = sink)
         d.run()
@@ -504,17 +522,57 @@ class MITTENS(object):
         g.close()
         nib.trackvis.write('%s_%s_%s.trk.gz'%(write_trk, from_id, to_id), trk_paths, hdr )
         return paths
+
+    def _oriented_nifti_data(self,nifti_file, is_labels=True):
+        """
+        Loads a NIfTI file and extracts its data for each node in the graph.
+        The NIfTI file must exist.
+
+        Parameters:
+        ===========
+        nifti_file:str
+          Path to NIfTI file
+        is_labels:bool
+          Does this file contain labels?
+
+        Returns:
+        ========
+        nifti_data_array:np.ndarray
+          Array with a single value for each node in the voxel graph
+
+        """
+
+        if not op.exists(nifti_file):
+            raise ValueError("%s does not exist" % nifti_file)
+        if self.flat_mask is None:
+            raise ValueError("No mask is available")
+
+        # Check for compatible shapes
+        img = nib.load(nifti_file)
+        if not img.shape[0] == self.volume_grid[0] and \
+               img.shape[1] == self.volume_grid[1] and \
+               img.shape[2] == self.volume_grid[2]:
+           raise ValueError("%s does not match dMRI volume" % nifti_file)
+
+        # Convert to LPS+ to match internal coordinates
+        dtype = np.int if is_labels else np.float
+        data = img.get_data().astype(dtype)
+        if img.affine[0,0] > 0:
+            data = data[::-1,:,:]
+            logger.info("Flipped X in %s", nifti_file)
+        if img.affine[1,1] > 0:
+            data = data[:,::-1,:]
+            logger.info("Flipped Y in %s", nifti_file)
+        if img.affine[2,2] < 0:
+            data = data[:,:,::-1]
+            logger.info("Flipped Z in %s", nifti_file)
+        return data.flatten(order="F")[self.flat_mask]
+
     
     def region_to_region_paths(self, from_nifti, to_nifti, write_trk="", write_prob=""):
         if self.voxel_graph is None:
             self.build_graph()
-        source_img = nib.load(from_nifti)
-        if not source_img.shape[0] == self.volume_grid[0] and \
-                source_img.shape[1] == self.volume_grid[1] and \
-                source_img.shape[2] == self.volume_grid[2]:
-           raise ValueError("%s does not match dMRI volume" % source_nifti)
-        source_data = source_img.get_data().astype(np.int)
-        source_labels = source_data.flatten(order="F")[self.flat_mask]
+        source_labels = self._oriented_nifti_data(from_nifti)
         source_nodes = np.flatnonzero(source_labels==1)
         sink_img = nib.load(to_nifti)
          
