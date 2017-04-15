@@ -39,7 +39,7 @@ hdr = np.array((b'TRACK', [ 98, 121, 121], [ 2.,  2.,  2.], [ 0.,  0.,  0.], 0, 
 class MITTENS(object):
     def __init__(self, fibgz_file="", nifti_prefix="", real_affine_image="", 
             step_size=np.sqrt(3)/2. , angle_max=35, odf_resolution="odf8", 
-            angle_weights="flat", angle_weighting_power=1.):
+            angle_weights="flat", angle_weighting_power=1.,normalize_doubleODF=False):
         """
         Represents a voxel graph.  Can be constructed with a DSI Studio ``fib.gz``
         file or from NIfTI files from a previous run. 
@@ -68,6 +68,8 @@ class MITTENS(object):
           Angle weighting scheme used while calculating transition probabilities
         angle_weighting_power:float
           Parameter used when an exponential weighting scheme is selected
+        normalize_doubleODF:bool
+          Should the transition probabilities from doubleODF be forced to sum to 1?
 
 
         Note:
@@ -97,6 +99,7 @@ class MITTENS(object):
         self.angle_max = angle_max
         self.orientation = None
         self.angle_weights = angle_weights
+        self.normalize_doubleODF = normalize_doubleODF
         self.angle_weighting_power = angle_weighting_power
         logger.info("\nUsing\n------\n  Step Size:\t\t%.4f Voxels \n  ODF Resolution:\t"
                 "%s\n  Max Angle:\t\t%.2f Degrees\n  Orientation:\t\t%s\n"
@@ -149,7 +152,8 @@ class MITTENS(object):
                     self.isotropic, isotropic_x2, self.prob_angles_weighted))
         self.doubleODF_null_probs = np.array(doubleODF_null_probs)
         self.doubleODF_null_probs[np.isnan(self.doubleODF_null_probs)]= 0 
-        self.doubleODF_null_probs = self.doubleODF_null_probs / self.doubleODF_null_probs.sum()
+        if self.normalize_doubleODF:
+            self.doubleODF_null_probs = self.doubleODF_null_probs / self.doubleODF_null_probs.sum()
 
     def _load_fibgz(self, path):
         logger.info("Loading %s", path)
@@ -170,7 +174,7 @@ class MITTENS(object):
         # DSI Studio stores data in LPS+
         #aff = aff * np.array([-1,-1,1,1])
         self.ras_affine = np.diag(aff)
-        self.voxel_size = aff
+        self.voxel_size = aff[:3]
 
         # Coordinate mapping information from fib file
         self.flat_mask = f["fa0"].squeeze() > 0
@@ -351,10 +355,13 @@ class MITTENS(object):
                         neighbor_shifts[nbr_name])]
                 outputs[n,m] = self.doubleODF_funcs[nbr_name](
                         odf, Ypc[neighbor_coord_num], prob_angles)
-        self.doubleODF_results = outputs / np.nansum(outputs, 1)[:,np.newaxis]
+        if self.normalize_doubleODF:
+            self.doubleODF_results = outputs / np.nansum(outputs, 1)[:,np.newaxis]
+        else:
+            self.doubleODF_results = outputs
 
         # Calculate the distances
-        logger.info("Calculating One-Ahead CoDI")
+        logger.info("Calculating Double ODF CoDI")
         self.doubleODF_codi = aitchison_distance(self.doubleODF_null_probs, 
                 self.doubleODF_results)
 
@@ -371,7 +378,7 @@ class MITTENS(object):
 
         # Write outputs if requested
         if output_prefix:
-            logger.info("Writing One-Ahead results")
+            logger.info("Writing Double ODF results")
             for n,nbr  in enumerate(neighbor_names):
                 outf = output_prefix + "_doubleODF_%s_prob.nii.gz" % (nbr)
                 logger.info("Writing %s", outf)
@@ -619,15 +626,20 @@ class MITTENS(object):
         to_nodes, to_name = get_region(to_region)
         
         # Loop over all the voxels in the from_region
-        sink_label_node = self.set_sink_using_nifti(self.voxel_graph, from_nodes)
+        sink_label_node = self.set_sink_using_nifti(self.voxel_graph, to_nodes)
         trk_paths = []
         probs = []
+        used_voxels = []
         for node in tqdm(from_nodes):
             if self.voxel_graph.neighbors(node):
                 path = self.Dijkstra(self.voxel_graph, node, sink_label_node)
                 probs.append(self.get_weighted_score(self.voxel_graph, path))
                 trk_paths.append(
                         (self.voxel_coords[np.array(path[0:-1])]*self.voxel_size, None, None))
+                used_voxels.append(True)
+            else:
+                used_voxels.append(False)
+
 
         # Write outputs
         if write_prob:
@@ -639,13 +651,13 @@ class MITTENS(object):
             nib.trackvis.write('%s_to_%s_%s.trk.gz'%(from_name, to_name, write_trk), 
                     trk_paths, hdr )
         if write_nifti:
+            used_voxels_mask = np.array(used_voxels,dtype=np.bool)
             output_probs = np.zeros(self.nvoxels)
-            output_probs[from_nodes] = np.array(probs)
+            output_probs[from_nodes][used_voxels_mask] = np.array(probs)
             self.save_nifti(output_probs, write_nifti)
 
             
         return trk_paths, probs
-        
 
     def get_maximum_spanning_forest(self):
         forest = networkit.graph.UnionMaximumSpanningForest(self.voxel_graph)
@@ -662,7 +674,6 @@ class MITTENS(object):
                 paths.append(path)
         pickle.dump(paths, open("bottleneck_paths_201_7002.pkl","wb"))
         return paths
-
 
     def calculate_connectivity_matrices(self,opts):
         """
