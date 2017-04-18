@@ -57,6 +57,10 @@ class MITTENS(object):
           data. DSI Studio does not preserve affine mappings. If provided, 
           all NIfTI outputs will be written with this affine. Otherwise the
           default affine from DSI Studio will be used.
+        mask_image:str
+          Path to a NIfTI file that has nonzero values in voxels that will be used
+          as nodes in the graph.  If none is provided, the default mask estimated by
+          DSI Studio is used.
         step_size:float
           Step size in voxel units. Used for calculating transition probabilities
         angle_max:float
@@ -90,6 +94,7 @@ class MITTENS(object):
         self.coordinate_lut = None
         self.label_lut = None
         self.voxel_graph = None
+        self.null_voxel_graph = None
         self.UMSF = None
         self.atlas_labels = None
         self.weighting_scheme = None
@@ -405,9 +410,11 @@ class MITTENS(object):
             self.save_nifti(self.doubleODF_coasy, output_prefix + "_doubleODF_CoAsy.nii.gz")
             self.save_nifti(self.doubleODF_results[:,-1], output_prefix + "_doubleODF_p_not_trackable.nii.gz")
 
-    def build_graph(self, doubleODF=True, weighting_scheme="minus_iso"):
+    def build_graph(self, doubleODF=True, weighting_scheme="minus_iso",
+            build_null_graph=True):
 
         G = networkit.graph.Graph(self.nvoxels, weighted=True, directed=True)
+        nG = networkit.graph.Graph(self.nvoxels, weighted=True, directed=True)
         self.weighting_scheme = weighting_scheme
         if doubleODF:
             prob_mat = self.doubleODF_results
@@ -421,7 +428,7 @@ class MITTENS(object):
                 probs = probs
             elif weighting_scheme == "minus_iso":
                 probs = probs - null_p
-                low = probs == 0
+                low = probs <= 0
                 probs[low] = 0 
                 probs = probs/np.linalg.norm(probs)
             else:
@@ -447,7 +454,7 @@ class MITTENS(object):
                 probs = probs/np.linalg.norm(probs)'''
             return -np.log(probs)
                 
-        # Add the voxels and their 
+        # Add the voxels and their probabilities
         for j, starting_voxel in tqdm(enumerate(self.voxel_coords),total=self.nvoxels):
             probs = weighting_func(prob_mat[j])
             for i, name in enumerate(neighbor_names):
@@ -457,7 +464,10 @@ class MITTENS(object):
                         G.addEdge(j, int(self.coordinate_lut[tuple(coord)]), w = probs[i])
                     else:
                         G.addEdge(j, int(self.coordinate_lut[tuple(coord)]), w=10000)
+                    if build_null_graph:
+                        nG.addEdge(j, int(self.coordinate_lut[tuple(coord)]), w = null_p[i])
         self.voxel_graph = G
+        self.null_voxel_graph = nG
 
     def add_atlas(self, atlas_nifti, min_voxels=1):
         """ Inserts bidirectional connections between a spaceless "region node"
@@ -516,6 +526,13 @@ class MITTENS(object):
             if (g.hasEdge(label_node, connected_node)):
                 g.removeEdge(label_node, connected_node)
             g.addEdge(connected_node,label_node, w=0)
+
+    def test_path_vs_null(self,path):
+        """
+        """
+        if None in (self.voxel_graph, self.null_voxel_graph):
+            raise AttributeError(
+                    "Both a voxel graph and null voxel graph are required")
 
     def get_prob(self, g, path):
         prob = 1 
