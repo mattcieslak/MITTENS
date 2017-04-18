@@ -122,6 +122,34 @@ A graph can build directly from MITTENS object.
 >>> mitns.build_graph(doubleODF=True, edge_weights="vs_null")
 ```
 
+## Finding and visualizing connections between regions
+
+Assuming the previous steps have been run, we can add an atlas to the graph
+and query for connections between regions. Here we have two cortical regions we'd
+like to connect. These regions are spheres around peak coordinates in primary 
+motor cortex (M1) and supplementary motor area (SMA). Here we find the shortest path
+from each voxel in the M1 sphere to any voxel in the SMA sphere. The paths are 
+saved to be loaded into DSI Studio as streamlines, optionally with their corresponding
+probabilities.
+
+```python
+>>> paths, probs = mitns.region_voxels_to_region_query("lm1_sphere.nii.gz", 
+                      "sma_sphere.nii.gz", write_trk="test", write_prob="test")
+
+```
+
+This will write out two files. One is ``lm1_sphere.nii.gz_to_sma_sphere.nii.gz_test.trk.gz``
+and the other is ``lm1_sphere.nii.gz_to_sma_sphere.nii.gz_test.txt``. To load in DSI Studio,
+open the fib file used earlier via the "Step 3: Fiber Tracking" button.  Load the streamlines
+through the context menu and color-code them based on their probabilities:
+
+![recon_opts](doc/img/open_results.png)
+
+the color-coded streamlines are more informative:
+
+![recon_opts](doc/img/prob_color_streamlines.png)
+
+
 
 
 
