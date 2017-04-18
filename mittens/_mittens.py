@@ -37,7 +37,7 @@ hdr = np.array((b'TRACK', [ 98, 121, 121], [ 2.,  2.,  2.], [ 0.,  0.,  0.], 0, 
 
 
 class MITTENS(object):
-    def __init__(self, fibgz_file="", nifti_prefix="", real_affine_image="", 
+    def __init__(self, fibgz_file="", nifti_prefix="", real_affine_image="", mask_image="",
             step_size=np.sqrt(3)/2. , angle_max=35, odf_resolution="odf8", 
             angle_weights="flat", angle_weighting_power=1.,normalize_doubleODF=False):
         """
@@ -93,6 +93,7 @@ class MITTENS(object):
         self.UMSF = None
         self.atlas_labels = None
         self.weighting_scheme = None
+        self.mask_image = mask_image
         # From args
         self.step_size = step_size
         self.odf_resolution = odf_resolution
@@ -200,6 +201,20 @@ class MITTENS(object):
         logger.info("Loaded ODF data: %s",str(self.odf_values.shape))
 
     def _load_niftis(self,input_prefix):
+        # If there is an external mask, use it before loading the niftis
+        external_mask=False
+        if op.exists(self.mask_image):
+            mask_img = nib.load(self.mask_image)
+            self.volume_grid = mask_img.shape
+            self.voxel_size = np.abs(np.diag(mask_img.affine)[:3])
+            total_voxels = np.prod(mask_img.shape)
+            self.flat_mask = np.ones(np.prod(total_voxels),dtype=np.bool)
+            self.flat_mask = self._oriented_nifti_data(self.mask_image).astype(np.bool)
+            masked_voxels = self.flat_mask.sum()
+            logger.info("Used %s to mask from %d to %d voxels", 
+                    self.mask_image, total_voxels, masked_voxels)
+            external_mask = True
+            
         logger.info("Loading singleODF results")
         singleODF_data = []
         for a in neighbor_names:
@@ -212,29 +227,32 @@ class MITTENS(object):
             if any([tmp_img.affine[0,0] < 0, tmp_img.affine[1,1] < 0, 
                 tmp_img.affine[2,2] < 0]):
                 logger.warn("NIfTI may not have come from MITTENS.")
-            singleODF_data.append(tmp_img.get_data()[::-1,::-1,:].flatten(order="F"))
+            if external_mask:
+                singleODF_data.append(self._oriented_nifti_data(outf))
+            else:
+                singleODF_data.append(tmp_img.get_data()[::-1,::-1,:].flatten(order="F"))
         singleODF_data = np.column_stack(singleODF_data)
 
         final_img = nib.load(outf)
-        self.volume_grid = final_img.shape
-        self.voxel_size = np.abs(np.diag(final_img.affine)[:3])
 
         # Use the mask from the fib file 
         if self.flat_mask is None:
-            logger.warn("Data mask estimated from NIfTI, not fib")
+            self.volume_grid = final_img.shape
+            self.voxel_size = np.abs(np.diag(final_img.affine)[:3])
+            logger.warn("Creating mask based on nonzero voxels in nifti files")
             self.flat_mask = singleODF_data.sum(1) > 0
-            self.nvoxels = self.flat_mask.sum()
-            self.voxel_coords = np.array(np.unravel_index(
-                np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
-            self.coordinate_lut = dict(
-                [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
-        singleODF_data = singleODF_data[self.flat_mask]
+
+        # Guaranteed to have a flat mask by now
+        self.nvoxels = self.flat_mask.sum()
+        self.voxel_coords = np.array(np.unravel_index(
+            np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
+        self.coordinate_lut = dict(
+            [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
+        if not external_mask:
+            singleODF_data = singleODF_data[self.flat_mask]
         self.singleODF_results = singleODF_data
 
-        def load_masked_nifti(nifti):
-            return nib.load(nifti).get_data()[::-1,::-1,:].flatten(order="F")[self.flat_mask]
-
-        self.singleODF_codi = load_masked_nifti( input_prefix + "_singleODF_CoDI.nii.gz")
+        self.singleODF_codi = self._oriented_nifti_data( input_prefix + "_singleODF_CoDI.nii.gz")
 
         logger.info("Reading doubleODF results")
         doubleODF_data = np.zeros_like(self.singleODF_results)
@@ -243,10 +261,10 @@ class MITTENS(object):
             if not op.exists(outf):
                 raise ValueError("Unable to load from niftis, can't find %s", outf)
             logger.info("Loading %s", outf)
-            doubleODF_data[:,n] = load_masked_nifti(outf)
+            doubleODF_data[:,n] = self._oriented_nifti_data(outf)
         self.doubleODF_results = doubleODF_data
-        self.doubleODF_codi = load_masked_nifti(input_prefix + "_doubleODF_CoDI.nii.gz")
-        self.doubleODF_coasy = load_masked_nifti(input_prefix + "_doubleODF_CoAsy.nii.gz")
+        self.doubleODF_codi = self._oriented_nifti_data(input_prefix + "_doubleODF_CoDI.nii.gz")
+        self.doubleODF_coasy = self._oriented_nifti_data(input_prefix + "_doubleODF_CoAsy.nii.gz")
 
     def get_prob_funcs(self, order="singleODF"):
 
@@ -429,12 +447,11 @@ class MITTENS(object):
                 probs = probs/np.linalg.norm(probs)'''
             return -np.log(probs)
                 
-
         # Add the voxels and their 
         for j, starting_voxel in tqdm(enumerate(self.voxel_coords),total=self.nvoxels):
             probs = weighting_func(prob_mat[j])
             for i, name in enumerate(neighbor_names):
-                coord = starting_voxel + ras_neighbor_shifts[name]
+                coord = starting_voxel + lps_neighbor_shifts[name]
                 if tuple(coord) in self.coordinate_lut and not np.isnan(probs[i]):
                     if (np.isfinite(probs[i])):
                         G.addEdge(j, int(self.coordinate_lut[tuple(coord)]), w = probs[i])
@@ -534,7 +551,7 @@ class MITTENS(object):
         nib.trackvis.write('%s_%s_%s.trk.gz'%(write_trk, from_id, to_id), trk_paths, hdr )
         return paths
 
-    def _oriented_nifti_data(self,nifti_file, is_labels=True):
+    def _oriented_nifti_data(self,nifti_file, is_labels=False):
         """
         Loads a NIfTI file and extracts its data for each node in the graph.
         The NIfTI file must exist.
