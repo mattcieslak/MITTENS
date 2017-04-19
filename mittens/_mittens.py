@@ -239,6 +239,7 @@ class MITTENS(object):
         singleODF_data = np.column_stack(singleODF_data)
 
         final_img = nib.load(outf)
+        self.ras_affine = final_img.affine
 
         # Use the mask from the fib file 
         if self.flat_mask is None:
