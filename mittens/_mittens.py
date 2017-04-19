@@ -484,28 +484,6 @@ class MITTENS(object):
         path = d.getPath(sink)
         return path 
 
-    def bottleneck(self, g, source, sink):
-        queue = [(0, source)]
-        dist = {}
-        dist[source] = 0 
-        prev = {}
-        while queue:
-            path_len, v = heappop(queue)
-            if v == sink:
-                break 
-            for n in g.neighbors(v):
-                alt = max(path_len, g.weight(v,n))
-                if (not n in dist or alt < dist[n]):
-                    dist[n] = alt
-                    prev[n] = v
-                    heappush(queue, (dist[n], n))
-        #Now get the path to the sink 
-        path = [sink]
-        n = sink
-        while (n != source):
-            n = prev[n]
-            path.append(n)
-        return path 
             
     def set_sink_using_nifti(self, g, connected_nodes):
         g.addNode()
@@ -560,8 +538,8 @@ class MITTENS(object):
                 path = self.Dijkstra(self.voxel_graph, node, self.label_lut[to_id])
                 paths.append([path, self.get_weighted_score(self.voxel_graph, path)])
         g = open('%s_%s_%s_probs.txt'%(write_prob, from_id, to_id), 'w')
+        trk_paths = []
         for path in paths:
-            trk_paths_region = []
             g.write(str(path[-1]) + '\n')
             trk_paths.append((self.voxel_coords[np.array(path[0][0:-1])]*2.0, None, None))
         g.close()
@@ -697,17 +675,6 @@ class MITTENS(object):
         forest = networkit.graph.UnionMaximumSpanningForest(self.voxel_graph)
         forest.run()
         self.UMSF = forest.getUMSF()
-
-    def voxel_region_bottleneck(self, from_id, to_id):
-        self.set_sink(self.voxel_graph, to_id)
-        source_nodes = np.flatnonzero(self.atlas_labels == from_id)
-        paths = []
-        for node in tqdm(source_nodes):
-            if self.voxel_graph.neighbors(node):
-                path = self.bottleneck(self.voxel_graph, node, self.label_lut[to_id])
-                paths.append(path)
-        pickle.dump(paths, open("bottleneck_paths_201_7002.pkl","wb"))
-        return paths
 
     def calculate_connectivity_matrices(self,opts):
         """
