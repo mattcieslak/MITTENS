@@ -664,12 +664,11 @@ class MITTENS(object):
             nib.trackvis.write('%s_to_%s_%s.trk.gz'%(from_name, to_name, write_trk), 
                     trk_paths, hdr )
         if write_nifti:
-            used_voxels_mask = np.array(used_voxels,dtype=np.bool)
-            output_probs = np.zeros(self.nvoxels)
+            used_voxels_mask = np.array(used_voxels, dtype=np.bool)
+            output_probs = np.zeros(self.nvoxels, dtype=np.float)
             output_probs[from_nodes][used_voxels_mask] = np.array(probs)
             self.save_nifti(output_probs, write_nifti)
 
-            
         return trk_paths, probs
 
     def get_maximum_spanning_forest(self):
