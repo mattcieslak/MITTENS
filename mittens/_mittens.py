@@ -665,8 +665,12 @@ class MITTENS(object):
                     trk_paths, hdr )
         if write_nifti:
             used_voxels_mask = np.array(used_voxels, dtype=np.bool)
+            node_probs = np.zeros(len(from_nodes),dtype=np.float)
+            node_probs[used_voxels_mask] = np.array(probs)
+  
+            # Place in the whole volume
             output_probs = np.zeros(self.nvoxels, dtype=np.float)
-            output_probs[from_nodes][used_voxels_mask] = np.array(probs)
+            output_probs[from_nodes] = node_probs
             self.save_nifti(output_probs, write_nifti)
 
         return trk_paths, probs
