@@ -1,9 +1,50 @@
 #!/usr/bin/env python
-from .utils import (neighbor_targets, get_dsi_studio_ODF_geometry, 
+from .utils import (get_dsi_studio_ODF_geometry, 
     pairwise_distances, angle_between, get_area_3d)
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
+
+# ONLY WORKS ASSUMING RAS+, ONLY USED IN write_solutions
+neighbor_targets = {
+    # z = 0
+    "la":  ((-1, 1, 0),( 0, 2, 1)),
+    "a":   (( 0, 1, 0),( 1, 2, 1)),
+    "ra":  (( 1, 1, 0),( 2, 2, 1)),
+    
+    "r":   (( 1, 0, 0),( 2, 1, 1)),
+    "l":   ((-1, 0, 0),( 0, 1, 1)),
+    
+    "lp":  ((-1,-1, 0),( 0, 0, 1)),
+    "p":   (( 0,-1, 0),( 1, 0, 1)),
+    "rp":  (( 1,-1, 0),( 2, 0, 1)),
+    
+    # z = 1
+    "las": ((-1, 1, 1),( 0, 2, 2)),
+    "as":  (( 0, 1, 1),( 1, 2, 2)),
+    "ras": (( 1, 1, 1),( 2, 2, 2)),
+    
+    "ls":  ((-1, 0, 1),( 0, 1, 2)),
+    "s":   (( 0, 0, 1),( 1, 1, 2)),
+    "rs":  (( 1, 0, 1),( 2, 1, 2)),
+    
+    "rps": (( 1,-1, 1),( 2, 0, 2)),
+    "ps":  (( 0,-1, 1),( 1, 0, 2)),
+    "lps": ((-1,-1, 1),( 0, 0, 2)),
+    
+    # z = -1
+    "rai": (( 1, 1,-1),( 2, 2, 0)),
+    "ai":  (( 0, 1,-1),( 1, 2, 0)),
+    "lai": ((-1, 1,-1),( 0, 2, 0)),
+    
+    "ri":  (( 1, 0,-1),( 2, 1, 0)),
+    "i":   (( 0, 0,-1),( 1, 1, 0)),
+    "li":  ((-1, 0,-1),( 0, 1, 0)),
+
+    "rpi": (( 1,-1,-1),( 2, 0, 0)),
+    "pi":  (( 0,-1,-1),( 1, 0, 0)),
+    "lpi": ((-1,-1,-1),( 0, 0, 0))
+}
 
 singleODF_header= """
 

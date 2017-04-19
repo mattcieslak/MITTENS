@@ -11,27 +11,30 @@ lps_neighbor_shifts = {
  'as': np.array([ 0, -1,  1]),
  'i': np.array([ 0,  0, -1]),
  'l': np.array([1, 0, 0]),
- 'la': np.array([-1, -1,  0]),
- 'lai': np.array([-1, -1, -1]),
- 'las': np.array([-1, -1,  1]),
+ 'la': np.array([ 1, -1,  0]),
+ 'lai': np.array([ 1, -1, -1]),
+ 'las': np.array([ 1, -1,  1]),
  'li': np.array([ 1,  0, -1]),
- 'lp': np.array([-1,  1,  0]),
- 'lpi': np.array([-1,  1, -1]),
- 'lps': np.array([-1,  1,  1]),
+ 'lp': np.array([1, 1, 0]),
+ 'lpi': np.array([ 1,  1, -1]),
+ 'lps': np.array([1, 1, 1]),
  'ls': np.array([1, 0, 1]),
  'p': np.array([0, 1, 0]),
  'pi': np.array([ 0,  1, -1]),
  'ps': np.array([0, 1, 1]),
  'r': np.array([-1,  0,  0]),
- 'ra': np.array([ 1, -1,  0]),
- 'rai': np.array([ 1, -1, -1]),
- 'ras': np.array([ 1, -1,  1]),
+ 'ra': np.array([-1, -1,  0]),
+ 'rai': np.array([-1, -1, -1]),
+ 'ras': np.array([-1, -1,  1]),
  'ri': np.array([-1,  0, -1]),
- 'rp': np.array([1, 1, 0]),
- 'rpi': np.array([ 1,  1, -1]),
- 'rps': np.array([1, 1, 1]),
+ 'rp': np.array([-1,  1,  0]),
+ 'rpi': np.array([-1,  1, -1]),
+ 'rps': np.array([-1,  1,  1]),
  'rs': np.array([-1,  0,  1]),
  's': np.array([0, 0, 1])}
+
+
+
 
 neighbor_names = sorted(lps_neighbor_shifts.keys())
 
@@ -64,46 +67,6 @@ ras_neighbor_shifts = {
  'rs': np.array([1, 0, 1]),
  's': np.array([0, 0, 1])}
 
-# ONLY WORKS ASSUMING RAS+, NEED TO CHANGE FOR 
-neighbor_targets = {
-    # z = 0
-    "la":  ((-1, 1, 0),( 0, 2, 1)),
-    "a":   (( 0, 1, 0),( 1, 2, 1)),
-    "ra":  (( 1, 1, 0),( 2, 2, 1)),
-    
-    "r":   (( 1, 0, 0),( 2, 1, 1)),
-    "l":   ((-1, 0, 0),( 0, 1, 1)),
-    
-    "lp":  ((-1,-1, 0),( 0, 0, 1)),
-    "p":   (( 0,-1, 0),( 1, 0, 1)),
-    "rp":  (( 1,-1, 0),( 2, 0, 1)),
-    
-    # z = 1
-    "las": ((-1, 1, 1),( 0, 2, 2)),
-    "as":  (( 0, 1, 1),( 1, 2, 2)),
-    "ras": (( 1, 1, 1),( 2, 2, 2)),
-    
-    "ls":  ((-1, 0, 1),( 0, 1, 2)),
-    "s":   (( 0, 0, 1),( 1, 1, 2)),
-    "rs":  (( 1, 0, 1),( 2, 1, 2)),
-    
-    "rps": (( 1,-1, 1),( 2, 0, 2)),
-    "ps":  (( 0,-1, 1),( 1, 0, 2)),
-    "lps": ((-1,-1, 1),( 0, 0, 2)),
-    
-    # z = -1
-    "rai": (( 1, 1,-1),( 2, 2, 0)),
-    "ai":  (( 0, 1,-1),( 1, 2, 0)),
-    "lai": ((-1, 1,-1),( 0, 2, 0)),
-    
-    "ri":  (( 1, 0,-1),( 2, 1, 0)),
-    "i":   (( 0, 0,-1),( 1, 1, 0)),
-    "li":  ((-1, 0,-1),( 0, 1, 0)),
-
-    "rpi": (( 1,-1,-1),( 2, 0, 0)),
-    "pi":  (( 0,-1,-1),( 1, 0, 0)),
-    "lpi": ((-1,-1,-1),( 0, 0, 0))
-}
 
 def get_dsi_studio_ODF_geometry(odf_key):
     """
