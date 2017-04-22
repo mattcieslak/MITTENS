@@ -424,7 +424,7 @@ class MITTENS(object):
             prob_mat = self.singleODF_results
             null_p = self.singleODF_null_probs
 
-        def weighting_func(probs):
+        def weighting_func(probs, weighting_scheme):
             if weighting_scheme == "negative_log_p":
                 probs = probs
             elif weighting_scheme == "minus_iso":
@@ -457,7 +457,8 @@ class MITTENS(object):
                 
         # Add the voxels and their probabilities
         for j, starting_voxel in tqdm(enumerate(self.voxel_coords),total=self.nvoxels):
-            probs = weighting_func(prob_mat[j])
+            probs = weighting_func(prob_mat[j], weighting_scheme)
+            probs_null = weighting_func(null_p, "negative_log_p")
             for i, name in enumerate(neighbor_names):
                 coord = starting_voxel + lps_neighbor_shifts[name]
                 if tuple(coord) in self.coordinate_lut and not np.isnan(probs[i]):
@@ -466,7 +467,7 @@ class MITTENS(object):
                     else:
                         G.addEdge(j, int(self.coordinate_lut[tuple(coord)]), w=10000)
                     if build_null_graph:
-                        nG.addEdge(j, int(self.coordinate_lut[tuple(coord)]), w = null_p[i])
+                        nG.addEdge(j, int(self.coordinate_lut[tuple(coord)]), w = probs_null[i])
         self.voxel_graph = G
         self.null_voxel_graph = nG
 
@@ -679,6 +680,44 @@ class MITTENS(object):
         forest = networkit.graph.UnionMaximumSpanningForest(self.voxel_graph)
         forest.run()
         self.UMSF = forest.getUMSF()
+
+    def pico_by_voxel(self, source, fname, versus_null = True):
+        labels = self._oriented_nifti_data(source)
+        start = np.flatnonzero(labels)
+        n = networkit.graph.Dijkstra(self.voxel_graph, start)
+        n.run()
+        if (versus_null):
+            vs = networkit.graph.Dijkstra(self.null_voxel_graph, start)
+            vs.run()
+        scores = []
+        v_null_scores = []
+        used_voxels = []
+        for node in self.voxel_graph.nodes():
+            if self.voxel_graph.neighbors(node):
+                used_voxels.append(True)
+                path = n.getPath(node)
+                if path:
+                    score = self.get_weighted_score(self.voxel_graph, path)
+                    if versus_null:
+                        null_path = vs.getPath(node)
+                        null_score = self.get_weighted_score(self.null_voxel_graph, null_path)
+                        v_null_score = score/null_score
+                else:
+                    score = 0
+                    v_null_score = 0 
+                scores.append(score)
+                if versus_null:
+                    v_null_scores.append(v_null_score)
+            else:
+                used_voxels.append(False) 
+        used_voxels_mask = np.array(used_voxels, dtype=np.bool)
+        output_probs = np.zeros(self.nvoxels)
+        output_probs[used_voxels_mask] = np.array(scores)
+        self.save_nifti(output_probs, fname)
+        if versus_null:
+            output_probs[used_voxels_mask] = np.array(v_null_scores)
+            self.save_nifti(output_probs, fname + "versus_null")
+        return output_probs, v_null_scores
 
     def calculate_connectivity_matrices(self,opts):
         """
