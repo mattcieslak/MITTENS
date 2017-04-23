@@ -486,7 +486,13 @@ class MITTENS(object):
         path = d.getPath(sink)
         return path 
 
-            
+    def set_source_using_nifti(self, g, connected_nodes):
+        g.addNode()
+        label_node = g.numberOfNodes()-1
+        for node in connected_nodes:
+            g.addEdge(label_node, node, w=0)
+        return label_node
+    
     def set_sink_using_nifti(self, g, connected_nodes):
         g.addNode()
         label_node = g.numberOfNodes()-1
@@ -681,43 +687,37 @@ class MITTENS(object):
         forest.run()
         self.UMSF = forest.getUMSF()
 
-    def pico_by_voxel(self, source, fname, versus_null = True):
-        labels = self._oriented_nifti_data(source)
-        start = np.flatnonzero(labels)
-        n = networkit.graph.Dijkstra(self.voxel_graph, start)
+    def pico_by_voxel(self, source, fname):
+        def get_region(region):
+            if type(region) is str:
+                labels = self._oriented_nifti_data(region)
+                return np.flatnonzero(labels)
+            if type(region) in (int, float):
+                nodes = np.flatnonzero(self.atlas_labels==region)
+                return nodes
+        starting_region = get_region(source)
+        source_label_node = self.set_source_using_nifti(self.voxel_graph, starting_region)
+        n = networkit.graph.Dijkstra(self.voxel_graph, source_label_node)
         n.run()
-        if (versus_null):
-            vs = networkit.graph.Dijkstra(self.null_voxel_graph, start)
-            vs.run()
         scores = []
-        v_null_scores = []
         used_voxels = []
         for node in self.voxel_graph.nodes():
-            if self.voxel_graph.neighbors(node):
-                used_voxels.append(True)
-                path = n.getPath(node)
-                if path:
-                    score = self.get_weighted_score(self.voxel_graph, path)
-                    if versus_null:
-                        null_path = vs.getPath(node)
-                        null_score = self.get_weighted_score(self.null_voxel_graph, null_path)
-                        v_null_score = score/null_score
+            if node!=source_label_node:
+                if self.voxel_graph.neighbors(node):
+                    used_voxels.append(True)
+                    path = n.getPath(node)
+                    if path:
+                        score = self.get_weighted_score(self.voxel_graph, path)
+                    else:
+                        score = 0
+                    scores.append(score)
                 else:
-                    score = 0
-                    v_null_score = 0 
-                scores.append(score)
-                if versus_null:
-                    v_null_scores.append(v_null_score)
-            else:
-                used_voxels.append(False) 
+                    used_voxels.append(False) 
         used_voxels_mask = np.array(used_voxels, dtype=np.bool)
         output_probs = np.zeros(self.nvoxels)
         output_probs[used_voxels_mask] = np.array(scores)
         self.save_nifti(output_probs, fname)
-        if versus_null:
-            output_probs[used_voxels_mask] = np.array(v_null_scores)
-            self.save_nifti(output_probs, fname + "versus_null")
-        return output_probs, v_null_scores
+        return output_probs
 
     def calculate_connectivity_matrices(self,opts):
         """
