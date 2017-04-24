@@ -531,6 +531,14 @@ class MITTENS(object):
         prob = prob ** (1./len(path))
         return prob
 
+    def get_bottleneck_score(self, g, path):
+        prob = 1
+        for step in range(len(path) - 1):
+            p = np.e**(-g.weight(path[step], path[step+1]))
+            if (p < prob):
+                prob = p 
+        return prob 
+
     def voxel_to_region_connectivity(self, from_id, to_id, write_trk="", write_prob=""):
         if self.voxel_graph is None:
             raise ValueError("Construct a voxel graph first")
@@ -687,7 +695,7 @@ class MITTENS(object):
         forest.run()
         self.UMSF = forest.getUMSF()
 
-    def pico_by_voxel(self, source, fname):
+    def pico_by_voxel(self, source, fname, bottle=False):
         def get_region(region):
             if type(region) is str:
                 labels = self._oriented_nifti_data(region)
@@ -697,8 +705,12 @@ class MITTENS(object):
                 return nodes
         starting_region = get_region(source)
         source_label_node = self.set_source_using_nifti(self.voxel_graph, starting_region)
-        n = networkit.graph.Dijkstra(self.voxel_graph, source_label_node)
-        n.run()
+        if bottle:
+            n = networkit.graph.BottleneckSP(self.voxel_graph, source_label_node)
+            n.run()
+        else:
+            n = networkit.graph.Dijkstra(self.voxel_graph, source_label_node)
+            n.run()
         scores = []
         used_voxels = []
         for node in self.voxel_graph.nodes():
@@ -707,7 +719,10 @@ class MITTENS(object):
                     used_voxels.append(True)
                     path = n.getPath(node)
                     if path:
-                        score = self.get_weighted_score(self.voxel_graph, path)
+                        if bottle:
+                            score = self.get_bottleneck_score(self.voxel_graph, path)
+                        else:
+                            score = self.get_weighted_score(self.voxel_graph, path)
                     else:
                         score = 0
                     scores.append(score)
