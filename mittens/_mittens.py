@@ -179,6 +179,8 @@ class MITTENS(object):
         self.volume_grid = f['dimension'].squeeze()
         aff = np.ones(4,dtype=np.float)
         aff[:3] = f['voxel_size'].squeeze()
+        # DSI Studio stores data in LPS+
+        #aff = aff * np.array([-1,-1,1,1])
         self.ras_affine = np.diag(aff)
         self.voxel_size = aff[:3]
 
@@ -294,6 +296,7 @@ class MITTENS(object):
             outf = input_prefix + "_doubleODF_%s_prob.nii.gz" % nbr
             if not op.exists(outf):
                 raise ValueError("Unable to load from niftis, can't find %s", outf)
+            logger.info("Loading %s", outf)
             doubleODF_data[:,n] = self._oriented_nifti_data(outf)
         self.doubleODF_results = doubleODF_data
         self.doubleODF_codi = self._oriented_nifti_data(input_prefix + "_doubleODF_CoDI.nii.gz")
@@ -419,6 +422,17 @@ class MITTENS(object):
         logger.info("Calculating Order1 KL Distance")
         self.singleODF_kl = kl_distance(self.singleODF_null_probs, self.singleODF_results)
 
+        # Write outputs if requested
+        if output_prefix:
+            logger.info("Writing singleODF results")
+            for a in neighbor_names:
+                outf = output_prefix + "_singleODF_%s_prob.nii.gz" % a
+                logger.info("Writing %s", outf)
+                self.save_nifti(
+                        self.singleODF_results[:,neighbor_names.index(a)], outf)
+            self.save_nifti(self.singleODF_kl, output_prefix + "_singleODF_KL.nii.gz")
+            self.save_nifti(self.singleODF_codi, output_prefix + "_singleODF_CoDI.nii.gz")
+
     def estimate_doubleODF(self, output_prefix=""):
         
         logger.info("Pre-computing neighbor angle weights")
@@ -427,6 +441,12 @@ class MITTENS(object):
 
         # Output matrix
         outputs = np.zeros((self.nvoxels,len(neighbor_names)),dtype=np.float)
+        if self.orientation == "lps":
+            neighbor_shifts = lps_neighbor_shifts
+        elif self.orientation == "ras":
+            neighbor_shifts = ras_neighbor_shifts
+        else:
+            raise ValueError
 
         def check_coord(coord):
             return np.all(
