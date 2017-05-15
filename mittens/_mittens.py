@@ -1078,7 +1078,7 @@ class MITTENS(object):
         raw_scores = np.zeros(self.nvoxels, dtype=np.float)
         path_lengths = np.zeros(self.nvoxels, dtype=np.float)
         for node in tqdm(np.arange(self.nvoxels)):
-            if components.componentOfNode(node) == target_component:
+            if components.componentOfNode(node) == target_component and self.voxel_graph.neighbors(node):
                 path = n.getPath(node)
                 if len(path):
                     raw_scores[node], scores[node] = self.get_weighted_scores(self.voxel_graph, path)
