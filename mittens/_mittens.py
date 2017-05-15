@@ -716,6 +716,7 @@ class MITTENS(object):
         label_node = g.numberOfNodes()-1
         for node in connected_nodes:
             g.addEdge(label_node, node, w=0)
+            g.addEdge(node, label_node, w=10)
         return label_node
     
     def set_sink_using_nifti(self, g, connected_nodes):
@@ -1062,8 +1063,7 @@ class MITTENS(object):
         source_label_node = self.set_source_using_nifti(self.voxel_graph, starting_region)
 
         # Find the connected components
-        undirected_version = self.voxel_graph.toUndirected()
-        components = networkit.components.ConnectedComponents(undirected_version)
+        components = networkit.components.StronglyConnectedComponents(self.voxel_graph)
         components.run()
         logger.info("Found %d components in the graph", components.numberOfComponents())
         target_component = components.componentOfNode(source_label_node)
@@ -1078,7 +1078,7 @@ class MITTENS(object):
         raw_scores = np.zeros(self.nvoxels, dtype=np.float)
         path_lengths = np.zeros(self.nvoxels, dtype=np.float)
         for node in tqdm(np.arange(self.nvoxels)):
-            if components.componentOfNode(node) == target_component and self.voxel_graph.neighbors(node):
+            if components.componentOfNode(node) == target_component:
                 path = n.getPath(node)
                 if len(path):
                     raw_scores[node], scores[node] = self.get_weighted_scores(self.voxel_graph, path)
