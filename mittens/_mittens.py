@@ -606,7 +606,7 @@ class MITTENS(object):
             
             if weighting_scheme.endswith("negative_log"):
                 prob_weights = -np.log(prob_weights)
-                prob_weights[np.logical_not(np.isfinite(prob_weights))] = 0
+                #prob_weights[np.logical_not(np.isfinite(prob_weights))] = 0
         
         # Use the transition probabilities as-is
         elif weighting_scheme == "transition probability":
@@ -620,13 +620,15 @@ class MITTENS(object):
             probs = prob_weights[j]
             for i, name in enumerate(neighbor_names):
                 coord = tuple(starting_voxel + lps_neighbor_shifts[name])
-                if probs[i] > 0:
+                if np.isfinite(probs[i]):
                     to_node = self.coordinate_lut.get(coord,-9999)
                     if to_node == -9999:
                         continue
                     # Actually adds the edge to the graph
-                    G.addEdge(j, to_node, w = probs[i])
-                    
+                    if probs[i] > 0:
+                        G.addEdge(j, to_node, w = probs[i])
+                    else:
+                        G.add(j, to_node, w = 9000)
         self.voxel_graph = G
 
     def build_null_graph(self, doubleODF=True, purpose="walks", require_all_neighbors=False):
@@ -772,6 +774,8 @@ class MITTENS(object):
         # Get weights out of the graph
         path_len = len(path)
         path_values = self._get_path_weights(g,path)
+        if 9000 in path_values:
+            return 0, 0  
 
         # Negate and exponentiate the weights to get back probabilities
         if "negative_log" in self.weighting_scheme:
