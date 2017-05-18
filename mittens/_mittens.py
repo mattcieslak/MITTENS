@@ -1065,6 +1065,70 @@ class MITTENS(object):
         self.save_nifti(raw_realnull_scores, nifti_prefix + "_realnull_shortest_path_score.nii.gz")
         self.save_nifti(realnull_scores, nifti_prefix + "_realnull_shortest_path_mean_score.nii.gz")
 
+    def backprop_prob_ratio_map(self, source_region, nifti_prefix="shortest_path",
+            use_bottleneck=False):
+        """
+        Calculates the highest probability ratio of any path going throungh any voxel
+
+        Parameters:
+        ===========
+        source_region:str or int
+          Either the integer ROI ID after ``add_atlas`` has been called, or a path
+          to a NIfTI file where nonzero values are the source voxels.
+
+        nifti_prefix:str
+          Path to where outputs will be written. This prefix will have _something.nii.gz
+          appended to it.
+
+        Returns:
+        ========
+        None
+
+        Outputs:
+        ========
+        A number of 3D NIfTI files will be written to disk depending on the arguments. 
+        At a minimum you will find
+
+         * 
+
+        """
+        starting_region, region_name = self._get_region(source_region)
+        source_label_node = self.set_source_using_nifti(self.voxel_graph, starting_region)
+
+        # Find the connected components
+        undirected_version = self.voxel_graph.toUndirected()
+        components = networkit.components.ConnectedComponents(undirected_version)
+        components.run()
+        logger.info("Found %d components in the graph", components.numberOfComponents())
+        target_component = components.componentOfNode(source_label_node)
+
+        # Run the modified Dijkstra algorithm from networkit
+        n = networkit.graph.Dijkstra(self.voxel_graph, source_label_node)
+        n.run()
+        logger.info("Computed shortest paths")
+
+        # Collect the shortest paths to each voxel and calculate a score
+        raw_scores = np.zeros(self.nvoxels, dtype=np.float)
+        null_scores = np.zeros(self.nvoxels, dtype=np.float)
+        path_lengths = np.zeros(self.nvoxels, dtype=np.float)
+        backprop = np.zeros(self.nvoxels, dtype=np.float)
+        for node in tqdm(np.arange(self.nvoxels)):
+            if components.componentOfNode(node) == target_component:
+                path = n.getPath(node)
+                if len(path):
+                    raw_scores[node] = self.get_prob(self.voxel_graph, path)
+                    null_scores[node] = self.get_prob(self.null_voxel_graph, path)
+                    prob_ratio = raw_scores[node] / null_scores[node]
+                    path = np.array(path)
+                    backprop[path] = np.maximum(backprop[path], prob_ratio)
+                else:
+                    logger.info("Shortest path map didn't find a path")
+                path_lengths[node] = len(path)
+        self.save_nifti(raw_scores, nifti_prefix + "_bp_shortest_path_score.nii.gz")
+        self.save_nifti(null_scores, nifti_prefix + "_bp_null_shortest_path_score.nii.gz")
+        self.save_nifti(path_lengths, nifti_prefix + "_bp_shortest_path_length.nii.gz")
+        self.save_nifti(backprop, nifti_prefix + "_backprop_prob_ratio.nii.gz")
+
     def shortest_path_map(self, source_region, nifti_prefix="shortest_path",
             use_bottleneck=False):
         """
