@@ -17,6 +17,7 @@ import os.path as op
 import networkit
 from heapq import heappush, heappop
 import pickle
+DISCONNECTED=999999999
 logger = logging.getLogger(__name__)
 opposites = [
     ("r","l"),
@@ -606,7 +607,7 @@ class MITTENS(object):
             
             if weighting_scheme.endswith("negative_log"):
                 prob_weights = -np.log(prob_weights)
-                prob_weights[np.logical_not(np.isfinite(prob_weights))] = 0
+                prob_weights[np.logical_not(np.isfinite(prob_weights))] = DISCONNECTED
         
         # Use the transition probabilities as-is
         elif weighting_scheme == "transition probability":
@@ -620,12 +621,15 @@ class MITTENS(object):
             probs = prob_weights[j]
             for i, name in enumerate(neighbor_names):
                 coord = tuple(starting_voxel + lps_neighbor_shifts[name])
+                to_node = self.coordinate_lut.get(coord,-9999)
+                if to_node == -9999:
+                    continue
                 if probs[i] > 0:
-                    to_node = self.coordinate_lut.get(coord,-9999)
-                    if to_node == -9999:
-                        continue
                     # Actually adds the edge to the graph
                     G.addEdge(j, to_node, w = probs[i])
+                else:
+                    G.addEdge(j, to_node, w = DISCONNECTED)
+
                     
         self.voxel_graph = G
 
@@ -711,12 +715,18 @@ class MITTENS(object):
         path = d.getPath(sink)
         return path 
 
+    def BottleneckShortestPath(self, g, source, sink):
+        d = networkit.graph.BottleneckSP(g, source, target = sink)
+        d.run()
+        path = d.getPath(sink)
+        return path 
+
     def set_source_using_nifti(self, g, connected_nodes):
         g.addNode()
         label_node = g.numberOfNodes()-1
         for node in connected_nodes:
             g.addEdge(label_node, node, w=0)
-            g.addEdge(node, label_node, w=10)
+            g.addEdge(node, label_node, w=DISCONNECTED)
         return label_node
     
     def set_sink_using_nifti(self, g, connected_nodes):
@@ -761,6 +771,27 @@ class MITTENS(object):
         return np.array(
             [g.weight(path[step], path[step+1]) for step in range(len(path)-1)])
 
+    def get_bottleneck_scores(self, g, path):
+        """
+        Extracts weights along a path in a graph and returns the 
+        cumulative weight and the mean weight along the path
+        """
+        if self.weighting_scheme is None:
+            raise ValueError("Build a graph first")
+        
+        # Get weights out of the graph
+        path_len = len(path)
+        path_values = self._get_path_weights(g,path)
+        if DISCONNECTED in path_values:
+            return 0, 0
+
+        # Negate and exponentiate the weights to get back probabilities
+        if "negative_log" in self.weighting_scheme:
+            prob = np.exp(-np.max(path_values))
+            return prob, prob ** (1./path_len)
+        # return the product and mean along the path
+        return np.min(path_values), np.mean(path_values)
+
     def get_weighted_scores(self, g, path):
         """
         Extracts weights along a path in a graph and returns the 
@@ -772,6 +803,8 @@ class MITTENS(object):
         # Get weights out of the graph
         path_len = len(path)
         path_values = self._get_path_weights(g,path)
+        if DISCONNECTED in path_values:
+            return 0, 0
 
         # Negate and exponentiate the weights to get back probabilities
         if "negative_log" in self.weighting_scheme:
@@ -1032,7 +1065,8 @@ class MITTENS(object):
         self.save_nifti(raw_realnull_scores, nifti_prefix + "_realnull_shortest_path_score.nii.gz")
         self.save_nifti(realnull_scores, nifti_prefix + "_realnull_shortest_path_mean_score.nii.gz")
 
-    def shortest_path_map(self, source_region, nifti_prefix="shortest_path"):
+    def shortest_path_map(self, source_region, nifti_prefix="shortest_path",
+            use_bottleneck=False):
         """
         Calculates the shortest paths and their scores from ``source_region`` to all
         other nodes (voxels) in the graph. 
@@ -1063,13 +1097,21 @@ class MITTENS(object):
         source_label_node = self.set_source_using_nifti(self.voxel_graph, starting_region)
 
         # Find the connected components
-        components = networkit.components.StronglyConnectedComponents(self.voxel_graph)
+        undirected_version = self.voxel_graph.toUndirected()
+        components = networkit.components.ConnectedComponents(undirected_version)
+        #components = networkit.components.StronglyConnectedComponents(self.voxel_graph)
         components.run()
         logger.info("Found %d components in the graph", components.numberOfComponents())
         target_component = components.componentOfNode(source_label_node)
 
         # Run the modified Dijkstra algorithm from networkit
-        n = networkit.graph.Dijkstra(self.voxel_graph, source_label_node)
+        if use_bottleneck:
+            n = networkit.graph.BottleneckSP(self.voxel_graph, source_label_node)
+            score_func = self.get_bottleneck_scores
+        else:
+            n = networkit.graph.Dijkstra(self.voxel_graph, source_label_node)
+            score_func = self.get_weighted_scores
+
         n.run()
         logger.info("Computed shortest paths")
 
@@ -1081,13 +1123,14 @@ class MITTENS(object):
             if components.componentOfNode(node) == target_component:
                 path = n.getPath(node)
                 if len(path):
-                    raw_scores[node], scores[node] = self.get_weighted_scores(self.voxel_graph, path)
+                    raw_scores[node], scores[node] = score_func(self.voxel_graph, path)
                 else:
                     logger.info("Shortest path map didn't find a path")
                 path_lengths[node] = len(path)
-        self.save_nifti(raw_scores, nifti_prefix + "_shortest_path_score.nii.gz")
-        self.save_nifti(scores, nifti_prefix + "_shortest_path_mean_score.nii.gz")
-        self.save_nifti(path_lengths, nifti_prefix + "_shortest_path_length.nii.gz")
+        suffix="_bottleneck" if use_bottleneck else ""
+        self.save_nifti(raw_scores, nifti_prefix + "_shortest_path_score%s.nii.gz"%suffix)
+        self.save_nifti(scores, nifti_prefix + "_shortest_path_mean_score%s.nii.gz"%suffix)
+        self.save_nifti(path_lengths, nifti_prefix + "_shortest_path_length%s.nii.gz"%suffix)
 
     def calculate_connectivity_matrices(self,opts):
         """
