@@ -4,7 +4,6 @@ import numpy as np
 from scipy.sparse import csr_matrix
 import re
 import importlib
-from scipy.sparse.linalg import expm
 from .utils import (neighbor_names, get_transition_analysis_matrices, 
         lps_neighbor_shifts, weight_transition_probabilities_by_odf, 
         compute_weights_as_neighbor_voxels, ras_neighbor_shifts)
@@ -15,8 +14,9 @@ from .distances import (kl_distance, aitchison_distance, kl_asymmetry,
 import nibabel as nib
 import os.path as op
 import networkit
-from heapq import heappush, heappop
-import pickle
+from time import time
+
+
 DISCONNECTED=999999999
 logger = logging.getLogger(__name__)
 opposites = [
@@ -488,7 +488,8 @@ class MITTENS(object):
         logger.info("Calculating CoAsy")
         self.doubleODF_coasy = aitchison_asymmetry(half1, half2)
 
-    def build_graph(self, doubleODF=True, weighting_scheme="minus_iso", require_all_neighbors=True):
+    def build_graph(self, doubleODF=True, weighting_scheme="minus_iso", 
+                                                require_all_neighbors=False):
         """
         Builds a ``networkit.graph.Graph`` from transition probabilities.
         
@@ -568,6 +569,7 @@ class MITTENS(object):
             
         
         if require_all_neighbors:
+            logger.info("Removing Voxels without all 26 neighbors connected")
             # Which probabilities point to a voxel not in the mask?
             not_in_graph = np.zeros((self.nvoxels, 26),dtype=np.bool)
             for j, starting_voxel in tqdm(enumerate(self.voxel_coords),total=self.nvoxels):
@@ -576,7 +578,8 @@ class MITTENS(object):
                     if not coord in self.coordinate_lut:
                         not_in_graph[j,i] = True
             incomplete_neighbor_nodes = not_in_graph.sum(1) > 0
-            #logger.info("Found %d nodes with incomplete neighbors",incomplete_neighbor_nodes.sum())
+            logger.info("Found %d nodes with incomplete neighbors",
+                                            incomplete_neighbor_nodes.sum())
             prob_mat[incomplete_neighbor_nodes] = 0 # Remove the outgoing edges
             if weighting_scheme in ("negative_log_p","minus_iso_negative_log",
                                     "minus_iso_scaled_negative_log"):
@@ -633,7 +636,8 @@ class MITTENS(object):
                     
         self.voxel_graph = G
 
-    def build_null_graph(self, doubleODF=True, purpose="walks", require_all_neighbors=False):
+    def build_null_graph(self, doubleODF=True, purpose="walks", 
+                                            require_all_neighbors=False):
         """
         Builds a ``networkit.graph.Graph`` from null transition probabilities.
         
@@ -665,6 +669,7 @@ class MITTENS(object):
             
         
         if require_all_neighbors:
+            logger.info("Removing Voxels without all 26 neighbors connected")
             # Which probabilities point to a voxel not in the mask?
             not_in_graph = np.zeros((self.nvoxels, 26),dtype=np.bool)
             for j, starting_voxel in tqdm(enumerate(self.voxel_coords),total=self.nvoxels):
@@ -813,29 +818,6 @@ class MITTENS(object):
         # return the product and mean along the path
         return np.prod(path_values), np.mean(path_values)
 
-    def voxel_to_region_connectivity(self, from_id, to_id, write_trk="", write_prob=""):
-        if self.voxel_graph is None:
-            raise ValueError("Construct a voxel graph first")
-        if self.label_lut is None:
-            raise ValueError("No atlas information")
-
- 
-        self.set_sink(self.voxel_graph,to_id)
-        source_nodes = np.flatnonzero(self.atlas_labels == from_id)
-        paths = []
-        for node in tqdm(source_nodes):
-            if self.voxel_graph.neighbors(node):
-                path = self.Dijkstra(self.voxel_graph, node, self.label_lut[to_id])
-                paths.append([path, self.get_weighted_score(self.voxel_graph, path)])
-        g = open('%s_%s_%s_probs.txt'%(write_prob, from_id, to_id), 'w')
-        trk_paths = []
-        for path in paths:
-            g.write(str(path[-1]) + '\n')
-            trk_paths.append((self.voxel_coords[np.array(path[0][0:-1])]*2.0, None, None))
-        g.close()
-        nib.trackvis.write('%s_%s_%s.trk.gz'%(write_trk, from_id, to_id), trk_paths, hdr )
-        return paths
-
     def _oriented_nifti_data(self,nifti_file, is_labels=False, warn=False):
         """
         Loads a NIfTI file and extracts its data for each node in the graph.
@@ -894,7 +876,7 @@ class MITTENS(object):
             return nodes, "region_%05d"%region
 
     def region_voxels_to_region_query(self, from_region, to_region, write_trk="", 
-            write_prob="", write_nifti=""):
+            write_prob="", write_nifti="", write_wm_maxprob_map=""):
         """
         Query paths from one region to another. Parameters ``from_region``
         and ``to_region`` can be a path to a nifti file or a region ID
@@ -925,34 +907,48 @@ class MITTENS(object):
         write_nifti:str
           Write the probabilities to a NIfTI file. Each voxel in ``from_region``
           will contain its probability.
+
+        write_wm_maxprob_map:str
+          Writes a map where each voxel contains the probability of the maximum
+          probability path that goes through it.
         """
         # Get lists of nodes for the query
-        def get_region(region):
-            # Find what nodes are part of a region
-            if type(region) is str:
-                labels = self._oriented_nifti_data(region)
-                return np.flatnonzero(labels), op.split(op.abspath(region))[-1]
-            if type(region) in (int, float):
-                nodes = np.flatnonzero(self.atlas_labels==region)
-                return nodes, "region_%05d"%region
-        from_nodes, from_name = get_region(from_region)
-        to_nodes, to_name = get_region(to_region)
+        from_nodes, from_name = self._get_region(from_region)
+        to_nodes, to_name = self._get_region(to_region)
         
         # Loop over all the voxels in the from_region
         sink_label_node = self.set_sink_using_nifti(self.voxel_graph, to_nodes)
-        trk_paths = []
-        probs = []
-        used_voxels = []
-        for node in tqdm(from_nodes):
-            if self.voxel_graph.neighbors(node):
-                path = self.Dijkstra(self.voxel_graph, node, sink_label_node)
-                probs.append(self.get_weighted_score(self.voxel_graph, path))
-                trk_paths.append(
-                        (self.voxel_coords[np.array(path[0:-1])]*self.voxel_size, None, None))
-                used_voxels.append(True)
-            else:
-                used_voxels.append(False)
 
+        # Find the connected components
+        undirected_version = self.voxel_graph.toUndirected()
+        components = networkit.components.ConnectedComponents(undirected_version)
+        components.run()
+        logger.info("Found %d components in the graph", components.numberOfComponents())
+        target_component = components.componentOfNode(sink_label_node)
+
+        n = networkit.graph.Dijkstra(self.voxel_graph, sink_label_node)
+        t0 = time()
+        n.run()
+        t1 = time()
+        logger.info("Computed shortest paths in %.05f sec", t1-t0)
+
+        trk_paths = []
+        probs = np.zeros(self.nvoxels,dtype=np.float)
+        maxprobs = np.zeros(self.nvoxels,dtype=np.float)
+        for node in tqdm(from_nodes):
+            if components.componentOfNode(node) == target_component:
+                path = n.getPath(node)
+                if not len(path): continue
+                score = self.get_weighted_score(self.voxel_graph, path)
+                probs[node] = score
+                if write_trk:
+                    trk_paths.append(
+                        (self.voxel_coords[np.array(path[0:-1])]*self.voxel_size, 
+                            None, None))
+                if write_wm_maxprob_map:
+                    path = np.array(path)
+                    path = path[path < self.nvoxels]
+                    maxprobs[path] = np.maximum(maxprobs[path], score)
 
         # Write outputs
         if write_prob:
@@ -964,14 +960,9 @@ class MITTENS(object):
             nib.trackvis.write('%s_to_%s_%s.trk.gz'%(from_name, to_name, write_trk), 
                     trk_paths, hdr )
         if write_nifti:
-            used_voxels_mask = np.array(used_voxels, dtype=np.bool)
-            node_probs = np.zeros(len(from_nodes),dtype=np.float)
-            node_probs[used_voxels_mask] = np.array(probs)
-  
-            # Place in the whole volume
-            output_probs = np.zeros(self.nvoxels, dtype=np.float)
-            output_probs[from_nodes] = node_probs
-            self.save_nifti(output_probs, write_nifti)
+            self.save_nifti(probs, write_nifti)
+        if write_wm_maxprob_map:
+            self.save_nifti(maxprobs, write_wm_maxprob_map)
 
         return trk_paths, probs
 
@@ -1099,13 +1090,13 @@ class MITTENS(object):
         undirected_version = self.voxel_graph.toUndirected()
         components = networkit.components.ConnectedComponents(undirected_version)
         components.run()
-        logger.info("Found %d components in the graph", components.numberOfComponents())
+        #logger.info("Found %d components in the graph", components.numberOfComponents())
         target_component = components.componentOfNode(source_label_node)
 
         # Run the modified Dijkstra algorithm from networkit
         n = networkit.graph.Dijkstra(self.voxel_graph, source_label_node)
         n.run()
-        logger.info("Computed shortest paths")
+        #logger.info("Computed shortest paths")
 
         # Collect the shortest paths to each voxel and calculate a score
         raw_scores = np.zeros(self.nvoxels, dtype=np.float)
@@ -1113,6 +1104,7 @@ class MITTENS(object):
         path_lengths = np.zeros(self.nvoxels, dtype=np.float)
         backprop = np.zeros(self.nvoxels, dtype=np.float)
         for node in tqdm(np.arange(self.nvoxels)):
+            print(node)
             if components.componentOfNode(node) == target_component:
                 path = n.getPath(node)
                 if len(path):
@@ -1120,6 +1112,7 @@ class MITTENS(object):
                     null_scores[node] = self.get_prob(self.null_voxel_graph, path)
                     prob_ratio = raw_scores[node] / null_scores[node]
                     path = np.array(path)
+                    path = path[path < self.nvoxels]
                     backprop[path] = np.maximum(backprop[path], prob_ratio)
                 else:
                     logger.info("Shortest path map didn't find a path")
@@ -1130,7 +1123,7 @@ class MITTENS(object):
         self.save_nifti(backprop, nifti_prefix + "_backprop_prob_ratio.nii.gz")
 
     def shortest_path_map(self, source_region, nifti_prefix="shortest_path",
-            use_bottleneck=False):
+            use_bottleneck=False, back_propagate_scores=True):
         """
         Calculates the shortest paths and their scores from ``source_region`` to all
         other nodes (voxels) in the graph. 
@@ -1154,8 +1147,6 @@ class MITTENS(object):
         A number of 3D NIfTI files will be written to disk depending on the arguments. 
         At a minimum you will find
 
-         * 
-
         """
         starting_region, region_name = self._get_region(source_region)
         source_label_node = self.set_source_using_nifti(self.voxel_graph, starting_region)
@@ -1163,7 +1154,6 @@ class MITTENS(object):
         # Find the connected components
         undirected_version = self.voxel_graph.toUndirected()
         components = networkit.components.ConnectedComponents(undirected_version)
-        #components = networkit.components.StronglyConnectedComponents(self.voxel_graph)
         components.run()
         logger.info("Found %d components in the graph", components.numberOfComponents())
         target_component = components.componentOfNode(source_label_node)
@@ -1175,26 +1165,38 @@ class MITTENS(object):
         else:
             n = networkit.graph.Dijkstra(self.voxel_graph, source_label_node)
             score_func = self.get_weighted_scores
-
+        t0 = time()
         n.run()
-        logger.info("Computed shortest paths")
+        t1 = time()
+        logger.info("Computed shortest paths in %.05f sec", t1-t0)
 
         # Collect the shortest paths to each voxel and calculate a score
         scores = np.zeros(self.nvoxels, dtype=np.float)
         raw_scores = np.zeros(self.nvoxels, dtype=np.float)
         path_lengths = np.zeros(self.nvoxels, dtype=np.float)
+        backprop = np.zeros(self.nvoxels, dtype=np.float)
         for node in tqdm(np.arange(self.nvoxels)):
             if components.componentOfNode(node) == target_component:
                 path = n.getPath(node)
                 if len(path):
                     raw_scores[node], scores[node] = score_func(self.voxel_graph, path)
+                    if back_propagate_scores:
+                        path = np.array(path)
+                        path = path[path < self.nvoxels]
+                        backprop[path] = np.maximum(backprop[path], scores[node])
                 else:
                     logger.info("Shortest path map didn't find a path")
                 path_lengths[node] = len(path)
         suffix="_bottleneck" if use_bottleneck else ""
-        self.save_nifti(raw_scores, nifti_prefix + "_shortest_path_score%s.nii.gz"%suffix)
-        self.save_nifti(scores, nifti_prefix + "_shortest_path_mean_score%s.nii.gz"%suffix)
-        self.save_nifti(path_lengths, nifti_prefix + "_shortest_path_length%s.nii.gz"%suffix)
+        self.save_nifti(raw_scores, 
+                nifti_prefix + "_shortest_path_score%s.nii.gz"%suffix)
+        self.save_nifti(scores, 
+                nifti_prefix + "_shortest_path_mean_score%s.nii.gz"%suffix)
+        self.save_nifti(path_lengths, 
+                nifti_prefix + "_shortest_path_length%s.nii.gz"%suffix)
+        if back_propagate_scores:
+            self.save_nifti(backprop, 
+                    nifti_prefix + "_shortest_path_backprop%s.nii.gz"%suffix)
 
     def calculate_connectivity_matrices(self,opts):
         """
