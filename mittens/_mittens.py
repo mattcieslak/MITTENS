@@ -917,7 +917,7 @@ class MITTENS(object):
         to_nodes, to_name = self._get_region(to_region)
         
         # Loop over all the voxels in the from_region
-        sink_label_node = self.set_sink_using_nifti(self.voxel_graph, to_nodes)
+        sink_label_node = self.set_source_using_nifti(self.voxel_graph, to_nodes)
 
         # Find the connected components
         undirected_version = self.voxel_graph.toUndirected()
