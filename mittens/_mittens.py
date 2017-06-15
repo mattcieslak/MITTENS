@@ -631,7 +631,10 @@ class MITTENS(object):
                     # Actually adds the edge to the graph
                     G.addEdge(j, to_node, w = probs[i])
                 else:
-                    G.addEdge(j, to_node, w = DISCONNECTED)
+                    if weighting_scheme == "transition probability":
+                        G.addEdge(j, to_node, w = np.finfo(np.float).eps)
+                    else:
+                        G.addEdge(j, to_node, w = DISCONNECTED)
 
                     
         self.voxel_graph = G
@@ -709,8 +712,8 @@ class MITTENS(object):
         """ Inserts bidirectional connections between a spaceless "region node"
         and all the voxels it inhabits. Also stores ROI information for querying.
         """
-        if self.label_lut is not None:
-            raise NotImplementedError("Cannot add multiple atlases yet")
+        #if self.label_lut is not None:
+         #   raise NotImplementedError("Cannot add multiple atlases yet")
         self.atlas_labels = self._oriented_nifti_data(atlas_nifti)
         self.label_lut = {}
 
@@ -733,6 +736,49 @@ class MITTENS(object):
             g.addEdge(label_node, node, w=0)
             g.addEdge(node, label_node, w=DISCONNECTED)
         return label_node
+
+    def flow(self, mask_image, to_id, from_id, fname):
+        self.build_graph(
+                        weighting_scheme="transition probability", doubleODF=True) 
+        self.add_atlas(mask_image)
+
+        source_node = self.set_source(self.voxel_graph, to_id, weight= 1)
+        sink_node = self.set_sink(self.voxel_graph,from_id,weight=1)
+
+        self.voxel_graph.indexEdges()
+
+        f = networkit.flow.EdmondsKarp(self.voxel_graph,source_node, sink_node)
+        f.run()
+
+        max_flow = f.getMaxFlow()
+        flow_vec = np.array(f.getFlowVector())
+        scores_incoming = np.zeros(self.nvoxels)
+        scores_outgoing = np.zeros(self.nvoxels)
+        for i,edge in enumerate(self.voxel_graph.edges()):
+            if (edge[0] >= self.nvoxels
+                    or edge[1] >= self.nvoxels
+                    ):continue
+            scores_incoming[edge[1]]+=flow_vec[i]
+            scores_outgoing[edge[0]]+=flow_vec[i]
+        self.save_nifti(scores_incoming, fname+"_incoming.nii.gz")
+        self.save_nifti(scores_outgoing, fname +"_outoging.nii.gz")
+
+        source_set = np.array(f.getSourceSet())
+        red_nodes = source_set
+        blue_nodes = np.setdiff1d(np.arange(self.nvoxels), red_nodes)
+
+        outputs = np.zeros(self.nvoxels)
+        outputs[red_nodes[red_nodes < self.nvoxels]] = 1
+        outputs[blue_nodes[blue_nodes < self.nvoxels]] = 2
+
+        self.save_nifti(outputs, fname+"_split.nii.gz")
+        return max_flow
+    
+
+
+    def get_edge_weights(self):
+        return np.array(
+                [self.voxel_graph.weight(e[0],e[1]) for e in self.voxel_graph.edges() ])
     
     def set_sink_using_nifti(self, g, connected_nodes):
         g.addNode()
@@ -741,7 +787,19 @@ class MITTENS(object):
             g.addEdge(node, label_node, w=0)
         return label_node
 
-    def set_sink(self,g, to_id):
+    def set_source(self,g, from_id, weight=0):
+        connected_nodes = np.flatnonzero(self.atlas_labels == from_id)
+        if (from_id in self.label_lut):
+            label_node = self.label_lut[from_id]
+        else:
+            g.addNode()
+            label_node = g.numberOfNodes() - 1
+            self.label_lut[from_id] = label_node
+        for connected_node in connected_nodes:
+            g.addEdge(label_node,connected_node, w=weight)
+        return label_node
+
+    def set_sink(self,g, to_id, weight=0):
         connected_nodes = np.flatnonzero(self.atlas_labels == to_id)
         if (to_id in self.label_lut):
             label_node = self.label_lut[to_id]
@@ -752,7 +810,8 @@ class MITTENS(object):
         for connected_node in connected_nodes:
             if (g.hasEdge(label_node, connected_node)):
                 g.removeEdge(label_node, connected_node)
-            g.addEdge(connected_node,label_node, w=0)
+            g.addEdge(connected_node,label_node, w=weight)
+        return label_node
 
     def test_path_vs_null(self,path):
         """
