@@ -1,3 +1,4 @@
+![mitten](doc/img/mitten.png)
 
 # MITTENS
 
@@ -163,3 +164,5 @@ Authors
 -------
  * Matt Cieslak
  * Tegan Brennan
+
+Logo by Allison Shapiro
