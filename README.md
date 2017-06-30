@@ -9,6 +9,15 @@ from DSI Studio is supported.
 
 ## Installation
 
+MITTENS only works in Python 3 because of its dependency on ``networkit``. 
+It requires a fork of ``networkit`` that can be installed like so:
+
+```bash
+git clone https://github.com/tsbrennan1/networkit.git
+cd networkit
+pip install -e .
+```
+
 While this software can be installed like any other python package, 
 it is possible to add custom compiled functions before installation.
 Analytical tractography requires the specification of a set of geometric 
@@ -20,7 +29,7 @@ You can add as many sets of geometric constraints as you like, but be
 warned that it can take awhile to compile them.  Remember you only
 need to compile a solution __once__. Also beware that some
 combinations of step size and turning angle maximum result in infinite
-sets of turning angle sequences. Python to crash with a recursion error
+sets of turning angle sequences. Python will crash with a recursion error
 in this case.
 
 ### Adding Geometric Constraints
@@ -96,8 +105,7 @@ From here you can estimate none-ahead or one-ahead, where NIfTI-1 files are
 saved for each neighbor direction:
 
 ```python
->>> mitns.estimate_singleODF("hcp")
->>> mitns.estimate_doubleODF("hcp")
+>>> mitns.calculate_transition_probabilities(output_prefix="hcp")
 ```
 
 You will find the output in the current working directory (unless you specified an 
@@ -120,7 +128,7 @@ are weighted by the tract transition expectation from one voxel to another.
 A graph can build directly from MITTENS object.
 
 ```python
->>> mitns.build_graph(doubleODF=True, edge_weights="vs_null")
+>>> mitns.build_graph(doubleODF=True, weighting_scheme="negative_log_p")
 ```
 
 ## Finding and visualizing connections between regions
