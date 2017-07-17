@@ -1,4 +1,5 @@
 import os.path as op
+import nibabel as nib
 import numpy as np
 import logging
 logger = logging.getLogger(__name__)
@@ -8,7 +9,12 @@ hdr = np.array((b'TRACK', [ 98, 121, 121], [ 2.,  2.,  2.], [ 0.,  0.,  0.], 0, 
 
 class Spatial(object):
     def _set_real_affine(self, affine_img):
-        pass
+        if affine_img:
+            img = nib.load(affine_img)
+            self.real_affine = img.affine
+        else:
+            self.real_affine = np.array([])
+
     def save_nifti(self, data, fname):
         out_data = np.zeros(np.prod(self.volume_grid),dtype=np.float)
         out_data[self.flat_mask] = data

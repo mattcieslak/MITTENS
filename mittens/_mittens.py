@@ -121,8 +121,7 @@ class MITTENS(Spatial):
             self._load_niftis(nifti_prefix)
 
         self._initialize_nulls()
-        if real_affine_image:
-            self._set_real_affine(real_affine_image)
+        self._set_real_affine(real_affine_image)
 
     def _initialize_nulls(self):
 
@@ -441,7 +440,7 @@ class MITTENS(Spatial):
         return VoxelGraph( 
                 # Transition Prob details
                 angle_max = self.angle_max, odf_resolution=self.odf_resolution, 
-                angle_weights=self.angle_weights, 
+                angle_weights=self.angle_weights, step_size=self.step_size,
                 angle_weighting_power=self.angle_weighting_power,
                 normalize_doubleODF=self.normalize_doubleODF,
                 # Spatial mapping
@@ -453,7 +452,7 @@ class MITTENS(Spatial):
                 )
 
     def build_graph(self, doubleODF=True, weighting_scheme="minus_iso", 
-                               save_matfile="",  require_all_neighbors=False):
+                                                 require_all_neighbors=False):
         """
         Builds a ``networkit.graph.Graph`` from transition probabilities.
         

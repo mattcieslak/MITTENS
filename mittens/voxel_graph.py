@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 import networkx as nx
 import numpy as np
-from scipy.sparse import csr_matrix
 import os
 from scipy.io.matlab import loadmat, savemat
 import logging
@@ -87,18 +86,19 @@ class VoxelGraph(Spatial):
 
         if matfile:
             logger.info("Loading voxel graph from matfile")
-            self._load_matfile()
+            self._load_matfile(matfile)
 
-# IO
+    # IO
     def _load_matfile(self,matfile):
         if not os.path.exists(matfile):
             logger.critical("No such file: %s",matfile)
             return
-        try:
-            m = loadmat(matfile)
-        except Exception, e:
-            logger.critical("Unable to load %s:\n %s", matfile, e)
-            return
+
+        #try:
+        m = loadmat(matfile)
+        #except Exception, e:
+        #    logger.critical("Unable to load %s:\n %s", matfile, e)
+        #    return
 
         # Transition prob details
         self.step_size = m['step_size']
@@ -141,6 +141,7 @@ class VoxelGraph(Spatial):
                 "flat_mask": self.flat_mask,
                 "nvoxels":self.nvoxels,
                 "voxel_size":self.voxel_size,
+                "volume_grid":self.volume_grid,
                 "weighting_scheme":self.weighting_scheme,
                 "step_size":self.step_size,
                 "odf_resolution":self.odf_resolution,
@@ -148,7 +149,9 @@ class VoxelGraph(Spatial):
                 "angle_weights":self.angle_weights,
                 "normalize_doubleODF":self.normalize_doubleODF,
                 "angle_weighting_power":self.angle_weighting_power,
-                "graph":networkit.algebraic.adjacencyMatrix(self.graph, matrixType="sparse")
+                "graph":networkit.algebraic.adjacencyMatrix(self.graph, matrixType="sparse"),
+                "ras_affine":self.ras_affine,
+                "real_affine":self.real_affine
         }
 
         savemat(matfile,m,do_compression=True)
@@ -161,7 +164,7 @@ class VoxelGraph(Spatial):
         nib.Nifti1Image(out_data.astype(np.float32), self.ras_affine
                 ).to_filename(fname)
 
-# Region of Interest functions
+    # Region of Interest functions
     def add_atlas(self, atlas_nifti, min_voxels=1):
         """ Inserts bidirectional connections between a spaceless "region node"
         and all the voxels it inhabits. Also stores ROI information for querying.
@@ -312,7 +315,7 @@ class VoxelGraph(Spatial):
 
         return trk_paths, probs
 
-# Utility functions
+    # Utility functions
     def get_edge_weights(self):
         return np.array(
                 [self.graph.weight(e[0],e[1]) for e in self.graph.edges() ])
@@ -323,7 +326,7 @@ class VoxelGraph(Spatial):
         else:
             logger.warn("Graph is already undirected")
 
-# Shortest paths
+    # Shortest paths
     def Dijkstra(self, g, source, sink):
         d = networkit.graph.Dijkstra(g, source, target = sink)
         d.run()
@@ -398,7 +401,7 @@ class VoxelGraph(Spatial):
         forest.run()
         self.UMSF = forest.getUMSF()
 
-# Voxel value functions
+    # Voxel value functions
     def backprop_prob_ratio_map(self, source_region, nifti_prefix="shortest_path",
             use_bottleneck=False):
         """
@@ -557,7 +560,7 @@ class VoxelGraph(Spatial):
         self.betweenness = \
             networkit.centrality.ApproxBetweenness2(self.graph)
             
-# Capacity
+    # Capacity
     def flow(self, mask_image, to_id, from_id, fname):
         self.build_graph(
                         weighting_scheme="transition probability", doubleODF=True) 

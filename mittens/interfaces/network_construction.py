@@ -9,11 +9,24 @@ from nipype.interfaces.base import (traits, File, isdefined,
 from glob import glob
 
 class VoxelGraphConstructionInputSpec(BaseInterfaceInputSpec):
-    fibgz_file = File(exists=True, mandatory=True, 
-                        desc=('fib.gz (with ODF data) file from DSI Studio'))
-    odf_resolution = traits.Enum(("odf8", "odf6", "odf4"), usedefault=True)
+    # Traits for graph construction
+    weighting_scheme = traits.Enum(("negative_log_p", "minus_iso", "minus_iso_scaled", 
+        "minus_iso_negative_log", "minus_iso_scaled_negative_log", "transition probability",
+        "null_walks","null_shortest_paths"),
+        usedefault=True, desc="How to turn transition probs into edge weights")
+    transition_probabilities = traits.Enum(("doubleODF","singleODF"), usedefault=True,
+            desc="Which transition probability calculation results to use")
+    
+    # Inputs specified by a nifti prefix
     nifti_prefix = traits.Str("mittens", usedefault=True, 
                         desc=('output prefix for file names'))
+
+    # Output file name
+    matfile_name = File("network.mat", usedefault=True, 
+                desc="Matfile where the voxel graph will go")
+
+    # Data from prob calc
+    odf_resolution = traits.Enum(("odf8", "odf6", "odf4"), usedefault=True)
     real_affine_image = File(exists=True, mandatory=False, 
                         desc=('NIfTI image with real affine to use'))
     mask_image = File(exists=True, mandatory=False, 
@@ -29,12 +42,7 @@ class VoxelGraphConstructionInputSpec(BaseInterfaceInputSpec):
     normalize_doubleODF = traits.Bool(True,usedefault=True,desc=("This should be True"))
 
 class VoxelGraphConstructionOutputSpec(TraitedSpec):
-    singleODF_CoDI = File(desc='')
-    doubleODF_CoDI = File(desc='')
-    doubleODF_CoAsy = File(desc='')
-    singleODF_probabilities = traits.List(desc=(''))
-    doubleODF_probabilities = traits.List(desc=(''))
-    nifti_prefix = traits.Str('')
+    network_matfile = File(desc='')
 
 class VoxelGraphConstruction(MittensBaseInterface):
 
@@ -71,17 +79,24 @@ class VoxelGraphConstruction(MittensBaseInterface):
                  normalize_doubleODF= self.inputs.normalize_doubleODF
                  )
 
-        IFLOGGER.info('Calculating transition probabilities')
-        mitns.calculate_transition_probabilities(output_prefix=self.inputs.nifti_prefix)
+        IFLOGGER.info('Constructing Voxel Graph')
 
+        # Build a null graph?
+        if self.inputs.weighting_scheme in ("null_walks", "null_shortest_paths"):
+            voxel_graph = mitns.build_null_graph(
+                    doubleODF=self.inputs.transition_probabilities == "doubleODF",
+                    purpose={"null_walks":"walks", "null_shortest_paths":"shortest paths"}[
+                        self.inputs.weighting_scheme])
+        else:
+            voxel_graph = mitns.build_graph(
+                    doubleODF=self.inputs.transition_probabilities == "doubleODF",
+                    weighting_scheme=self.inputs.weighting_scheme)
+
+        voxel_graph.save(self.inputs.matfile_name)
+            
         return runtime
 
     def _list_outputs(self):
         outputs = self._outputs().get()
-        prefix = op.abspath(self.inputs.nifti_prefix)
-        outputs['singleODF_CoDI'] = prefix + '_singleODF_CoDI.nii.gz'
-        outputs['doubleODF_CoDI'] = prefix + '_doubleODF_CoDI.nii.gz'
-        outputs['doubleODF_CoAsy'] = prefix + '_doubleODF_CoAsy.nii.gz'
-        outputs['singleODF_probabilities'] = glob(prefix+"*_singleODF_*_prob.nii.gz")
-        outputs['doubleODF_probabilities'] = glob(prefix+"*_doubleODF_*_prob.nii.gz")
+        outputs['network_matfile'] = op.abspath(self.inputs.nifti_prefix)
         return outputs
