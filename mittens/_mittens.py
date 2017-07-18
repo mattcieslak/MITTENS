@@ -519,7 +519,7 @@ class MITTENS(Spatial):
           
         """
 
-        G = networkit.graph.Graph(self.nvoxels, weighted=True, directed=True)
+        G = networkit.graph.Graph(int(self.nvoxels), weighted=True, directed=True)
 
         # Place the requested probabilities into `prob_mat` 
         if doubleODF:
@@ -626,7 +626,7 @@ class MITTENS(Spatial):
           
         """
 
-        G = networkit.graph.Graph(self.nvoxels, weighted=True, directed=True)
+        G = networkit.graph.Graph(int(self.nvoxels), weighted=True, directed=True)
 
         # Place the requested probabilities into `prob_mat` 
         if doubleODF:

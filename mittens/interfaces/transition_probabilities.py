@@ -60,11 +60,13 @@ class MittensTransitionProbabilityCalc(MittensBaseInterface):
 
     def _run_interface(self, runtime):
         from mittens import MITTENS
+        mask_image = self.inputs.mask_image if isdefined(self.inputs.mask_image) else ""
+        aff_img = self.inputs.real_affine_image if isdefined(self.inputs.real_affine_image) else ""
         mitns = MITTENS(
                  fibgz_file=self.inputs.fibgz_file,
                  odf_resolution=self.inputs.odf_resolution,
-                 real_affine_image = self.inputs.real_affine_image,
-                 mask_image = self.inputs.mask_image,
+                 real_affine_image = aff_img,
+                 mask_image = mask_image,
                  step_size = self.inputs.step_size,
                  angle_max = self.inputs.angle_max,
                  angle_weights = self.inputs.angle_weights,
@@ -85,4 +87,5 @@ class MittensTransitionProbabilityCalc(MittensBaseInterface):
         outputs['doubleODF_CoAsy'] = prefix + '_doubleODF_CoAsy.nii.gz'
         outputs['singleODF_probabilities'] = glob(prefix+"*_singleODF_*_prob.nii.gz")
         outputs['doubleODF_probabilities'] = glob(prefix+"*_doubleODF_*_prob.nii.gz")
+        outputs['nifti_prefix'] = prefix
         return outputs

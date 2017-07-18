@@ -18,7 +18,7 @@ class VoxelGraphConstructionInputSpec(BaseInterfaceInputSpec):
             desc="Which transition probability calculation results to use")
     
     # Inputs specified by a nifti prefix
-    nifti_prefix = traits.Str("mittens", usedefault=True, 
+    nifti_prefix = traits.Str("mittens", usedefault=True, required=True,
                         desc=('output prefix for file names'))
 
     # Output file name
@@ -67,11 +67,13 @@ class VoxelGraphConstruction(MittensBaseInterface):
 
     def _run_interface(self, runtime):
         from mittens import MITTENS
+        mask_image = self.inputs.mask_image if isdefined(self.inputs.mask_image) else ""
+        aff_img = self.inputs.real_affine_image if isdefined(self.inputs.real_affine_image) else ""
         mitns = MITTENS(
                  nifti_prefix=self.inputs.nifti_prefix,
                  odf_resolution=self.inputs.odf_resolution,
-                 real_affine_image = self.inputs.real_affine_image,
-                 mask_image = self.inputs.mask_image,
+                 real_affine_image = aff_img,
+                 mask_image = mask_image,
                  step_size = self.inputs.step_size,
                  angle_max = self.inputs.angle_max,
                  angle_weights = self.inputs.angle_weights,
@@ -98,5 +100,5 @@ class VoxelGraphConstruction(MittensBaseInterface):
 
     def _list_outputs(self):
         outputs = self._outputs().get()
-        outputs['network_matfile'] = op.abspath(self.inputs.nifti_prefix)
+        outputs['network_matfile'] = op.abspath(self.inputs.matfile_name)
         return outputs
