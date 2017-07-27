@@ -15,12 +15,29 @@ class Spatial(object):
         else:
             self.real_affine = np.array([])
 
-    def save_nifti(self, data, fname):
+    def save_nifti(self, data, fname, real_affine=False):
         out_data = np.zeros(np.prod(self.volume_grid),dtype=np.float)
         out_data[self.flat_mask] = data
+        # Mimic the behavior of DSI Studio
         out_data = out_data.reshape(self.volume_grid, order="F")[::-1,::-1,:]
-        nib.Nifti1Image(out_data.astype(np.float32), self.ras_affine
-                ).to_filename(fname)
+        if not real_affine:
+            affine = self.ras_affine
+        else:
+            if not self.real_affine.size > 0:
+                raise ValueError("No real affine is available")
+            if np.sign(self.ras_affine[0,0]) != np.sign(self.real_affine[0,0]):
+                out_data = out_data[::-1,:,:]
+            if np.sign(self.ras_affine[1,1]) != np.sign(self.real_affine[1,1]):
+                out_data = out_data[:,::-1,:]
+            if np.sign(self.ras_affine[2,2]) != np.sign(self.real_affine[2,2]):
+                out_data = out_data[:,:,::-1]
+            affine = self.real_affine
+
+        img = nib.Nifti1Image(out_data,affine)
+        # Prevent annoying behavior in AFNI
+        img.header.sform_code = 2
+        img.header.qform_code = 2
+        img.to_filename(fname)
 
     def _oriented_nifti_data(self,nifti_file, is_labels=False, warn=False):
         """

@@ -157,15 +157,8 @@ class VoxelGraph(Spatial):
         savemat(matfile,m,do_compression=True)
         logger.info("Saved matfile to %s", matfile)
 
-    def save_nifti(self, data, fname):
-        out_data = np.zeros(np.prod(self.volume_grid),dtype=np.float)
-        out_data[self.flat_mask] = data
-        out_data = out_data.reshape(self.volume_grid, order="F")[::-1,::-1,:]
-        nib.Nifti1Image(out_data.astype(np.float32), self.ras_affine
-                ).to_filename(fname)
-
     # Region of Interest functions
-    def add_atlas(self, atlas_nifti, min_voxels=1):
+    def add_atlas(self, atlas_nifti, min_voxels=1, connect_to_voxels=False ):
         """ Inserts bidirectional connections between a spaceless "region node"
         and all the voxels it inhabits. Also stores ROI information for querying.
         """
@@ -173,6 +166,10 @@ class VoxelGraph(Spatial):
          #   raise NotImplementedError("Cannot add multiple atlases yet")
         self.atlas_labels = self._oriented_nifti_data(atlas_nifti)
         self.label_lut = {}
+
+        if connect_to_voxels:
+            for region in self.label_lut.keys():
+                pass
 
     def set_source_using_nifti(self, g, connected_nodes):
         g.addNode()
@@ -557,8 +554,12 @@ class VoxelGraph(Spatial):
 
     def voxelwise_approx_betweenness(self,nSamples=500, normalized=True,
             parallel=True):
-        self.betweenness = \
-            networkit.centrality.ApproxBetweenness2(self.graph)
+        btw = \
+            networkit.centrality.ApproxBetweenness2(self.graph, nSamples=nSamples,
+                    normalized=normalized,parallel=parallel)
+        btw.run()
+        return np.array(btw.scores())
+        
             
     # Capacity
     def flow(self, mask_image, to_id, from_id, fname):
