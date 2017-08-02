@@ -130,6 +130,19 @@ class VoxelGraph(Spatial):
                                 edge_attribute="w")
         self.graph = networkit.nxadapter.nx2nk(sparse_graph, weightAttr="w")
 
+    def mask(self, mask_image):
+        """
+        remove voxels that aren't 0 in ``mask_image``.
+        Voxels that aren't already in the voxel graph but are
+        nonzero in the mask image will not be added.
+        """
+        external_flat_mask = self._oriented_nifti_data(mask_image)
+        for removed_node in tqdm(np.flatnonzero(external_flat_mask[self.flat_mask > 0] == 0)):
+            for neighbor in self.graph.neighbors(removed_node):
+                self.graph.removeEdge(removed_node, neighbor)
+            self.graph.removeNode(removed_node)
+        self.flat_mask = self.flat_mask & external_flat_mask
+
     def save(self,matfile):
         if self.graph is None:
             raise ValueError("No graph to save")

@@ -85,4 +85,4 @@ class Spatial(object):
         if img.affine[2,2] < 0:
             data = data[:,:,::-1]
             if warn: logger.info("Flipped Z in %s", nifti_file)
-        return data.flatten(order="F")[self.flat_mask]
+        return data.flatten(order="F")[self.flat_mask > 0]
