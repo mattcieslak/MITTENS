@@ -17,7 +17,7 @@ class Spatial(object):
 
     def save_nifti(self, data, fname, real_affine=False):
         out_data = np.zeros(np.prod(self.volume_grid),dtype=np.float)
-        out_data[self.flat_mask > 0] = data
+        out_data[self.flat_mask] = data
         # Mimic the behavior of DSI Studio
         out_data = out_data.reshape(self.volume_grid, order="F")[::-1,::-1,:]
         if not real_affine:
@@ -85,4 +85,4 @@ class Spatial(object):
         if img.affine[2,2] < 0:
             data = data[:,:,::-1]
             if warn: logger.info("Flipped Z in %s", nifti_file)
-        return data.flatten(order="F")[self.flat_mask > 0]
+        return data.flatten(order="F")[self.flat_mask]

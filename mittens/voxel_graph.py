@@ -110,7 +110,7 @@ class VoxelGraph(Spatial):
         self.angle_weighting_power = m['angle_weighting_power']
         
         # Spatial mappings
-        self.flat_mask = m['flat_mask'].squeeze()
+        self.flat_mask = m['flat_mask'].squeeze().astype(np.bool)
         masked_voxels = self.flat_mask.sum()
         assert masked_voxels == m['nvoxels']
         self.ras_affine = m['ras_affine']
@@ -136,12 +136,38 @@ class VoxelGraph(Spatial):
         Voxels that aren't already in the voxel graph but are
         nonzero in the mask image will not be added.
         """
-        external_flat_mask = self._oriented_nifti_data(mask_image)
-        for removed_node in tqdm(np.flatnonzero(external_flat_mask[self.flat_mask > 0] == 0)):
-            for neighbor in self.graph.neighbors(removed_node):
-                self.graph.removeEdge(removed_node, neighbor)
-            self.graph.removeNode(removed_node)
-        self.flat_mask = self.flat_mask & external_flat_mask
+        external_flat_mask = self._oriented_nifti_data(mask_image) > 0
+        if np.all(external_flat_mask):
+            logger.info("Mask does not remove any voxels")
+            return
+
+        masked_num = external_flat_mask.sum()
+        logger.info("Reducing number of nodes from %d to %d", self.nvoxels, masked_num)
+        new_graph = networkit.Graph(n=masked_num, directed=True, weighted=True)
+        full_to_sub = {}
+        for sub, full in enumerate(np.flatnonzero(external_flat_mask)):
+            full_to_sub[full] = sub
+
+
+        def insert_new_edges(from_node,to_node,edgeweight,edgeid):
+            new_from_node = full_to_sub.get(from_node,-99)
+            new_to_node = full_to_sub.get(to_node, -99)
+            if -99 in (new_from_node, new_to_node):
+                return
+            new_graph.addEdge(new_from_node,new_to_node,edgeweight)
+
+        for node in full_to_sub.keys():
+            self.graph.forEdgesOf(node, insert_new_edges)
+
+        self.graph = new_graph
+        self.flat_mask[self.flat_mask] =  external_flat_mask
+        self.nvoxels = masked_num
+        
+        # Update the coordinate tables
+        self.voxel_coords = np.array(np.unravel_index(
+            np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
+        self.coordinate_lut = dict(
+            [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
 
     def save(self,matfile):
         if self.graph is None:

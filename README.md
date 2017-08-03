@@ -18,6 +18,9 @@ cd networkit
 pip install -e .
 ```
 
+NOTE: On Mac OS you may need to specify the path to a recent c++
+compiler. E.g. ``export CXX=/usr/local/bin/g++-7``.
+
 While this software can be installed like any other python package, 
 it is possible to add custom compiled functions before installation.
 Analytical tractography requires the specification of a set of geometric 
@@ -32,13 +35,13 @@ combinations of step size and turning angle maximum result in infinite
 sets of turning angle sequences. Python will crash with a recursion error
 in this case.
 
-### Adding Geometric Constraints
+### Adding Geometric Constraints (optional)
 
 Download the current version of MITTENS and enter its source tree:
 
 ```bash
 $ git clone https://github.com/mattcieslak/MITTENS.git
-$ cd mittens
+$ cd MITTENS
 ```
 
 Now, launch a python session in the mittens directory
