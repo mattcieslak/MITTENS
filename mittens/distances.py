@@ -14,17 +14,19 @@ def aitchison_distance(null_probs,obs_probs):
     numerator, denominator = np.row_stack(idx_pairs).T
     aitchison_minus = np.log(null_probs[numerator] / null_probs[denominator])
     
-    for n, obs in enumerate(obs_probs):
-        out[n] = np.sqrt(1./D * np.sum( 
-            (np.log(obs[numerator]/obs[denominator]) - aitchison_minus   )**2 ))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        for n, obs in enumerate(obs_probs):
+            out[n] = np.sqrt(1./D * np.nansum( 
+                (np.log(obs[numerator]/obs[denominator]) - aitchison_minus   )**2 ))
     
-    return out
+    return np.nan_to_num(out)
 
 def kl_distance(null_probs, obs_probs):
     out = np.zeros(obs_probs.shape[0], dtype=np.float)
-    for n,obs in enumerate(obs_probs):
-        out[n]= np.sum(null_probs * np.log(null_probs / obs) )
-    return out
+    with np.errstate(divide='ignore', invalid='ignore'):
+        for n,obs in enumerate(obs_probs):
+            out[n]= np.nansum(null_probs * np.log(null_probs / obs) )
+    return np.nan_to_num(out)
 
 def aitchison_asymmetry(half1, half2):
     out = np.zeros(half1.shape[0], dtype=np.float)
@@ -35,12 +37,13 @@ def aitchison_asymmetry(half1, half2):
             idx_pairs.append(np.array([j,i]))
     numerator, denominator = np.row_stack(idx_pairs).T
     
-    for n, (x,y) in enumerate(zip(half1, half2)):
-        out[n] = np.sqrt(1./D * np.sum( 
-            (np.log(x[numerator]/x[denominator]) - \
-             np.log(y[numerator]/y[denominator]))**2 ))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        for n, (x,y) in enumerate(zip(half1, half2)):
+            out[n] = np.sqrt(1./D * np.nansum( 
+                (np.log(x[numerator]/x[denominator]) - \
+                 np.log(y[numerator]/y[denominator]))**2 ))
     
-    return out
+    return np.nan_to_num(out)
 
 def kl_asymmetry(half1, half2):
     out1 = np.zeros(half1.shape[0], dtype=np.float)

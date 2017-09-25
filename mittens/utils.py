@@ -236,7 +236,11 @@ def weight_transition_probabilities_by_odf(odf, weight_matrix):
     """
     prob_angles_weighted = np.tile(odf[:,np.newaxis],
             (weight_matrix.shape[1] // odf.shape[0], weight_matrix.shape[0])).T * weight_matrix
-    return prob_angles_weighted / prob_angles_weighted.sum(1)[:,np.newaxis]
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mat = prob_angles_weighted / prob_angles_weighted.sum(1)[:,np.newaxis]
+        
+    return np.nan_to_num(mat)
 
 def compute_weights_as_neighbor_voxels(odfs, weight_matrix):
     """

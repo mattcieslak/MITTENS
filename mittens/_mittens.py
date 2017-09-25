@@ -222,14 +222,24 @@ class MITTENS(Spatial):
             valid_odfs.append(odfs[:,odf_sum_mask].T)
 
         self.odf_values = np.row_stack(valid_odfs).astype(np.float64)
-        self.odf_values = self.odf_values / self.odf_values.sum(1)[:,np.newaxis] * 0.5
+        norm_factor = self.odf_values.sum(1)
+        norm_factor[norm_factor == 0] = 1.
+        self.odf_values = self.odf_values / norm_factor[:,np.newaxis] * 0.5
         logger.info("Loaded ODF data: %s",str(self.odf_values.shape))
 
     def _load_niftis(self,input_prefix):
         # If there is an external mask, use it before loading the niftis
         external_mask=False
+        possible_mask = input_prefix + "_mask.nii.gz"
         if op.exists(self.mask_image):
-            mask_img = nib.load(self.mask_image)
+            mask_path = self.mask_image
+        elif op.exists(possible_mask):
+            mask_path = possible_mask
+        else:
+            mask_path = ""
+            
+        if op.exists(mask_path):
+            mask_img = nib.load(mask_path)
             self.volume_grid = mask_img.shape
             self.voxel_size = np.abs(np.diag(mask_img.affine)[:3])
             total_voxels = np.prod(mask_img.shape)
@@ -330,6 +340,7 @@ class MITTENS(Spatial):
     def calculate_transition_probabilities(self,output_prefix="mittens"):
         self.estimate_singleODF(output_prefix)
         self.estimate_doubleODF(output_prefix)
+        self.save_nifti(self.flat_mask.astype(np.float), output_prefix + "_mask.nii.gz")
 
         # Write outputs if requested
         if output_prefix:

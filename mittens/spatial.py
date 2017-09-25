@@ -16,6 +16,35 @@ class Spatial(object):
             self.real_affine = np.array([])
 
     def save_nifti(self, data, fname, real_affine=False):
+        """
+        Writes a value for each node into a 3D volume.
+        
+        Parameters:
+        ===========
+        
+        data:np.ndarray
+          A value for each voxel (node) in the graph.
+          
+        fname:str
+          Path where the output nifti file goes. Must end with .nii or .nii.gz
+          
+        real_affine:bool
+          Should the NIfTI file include a real affine (True) or use the default
+          DSI Studio output space (False)
+        """
+        # Check that data is 1D
+        if len(data.shape) > 1:
+            sq = data.squeeze()
+            if len(sq.shape) > 1:
+                logger.critical("Can only writs out 1D arrays")
+                return
+            data = sq
+        # Are there extra nodes (eg from atlas regions)?
+        if len(data) > self.nvoxels:
+            logger.warning("""
+            Non-voxel nodes have values in this data. Only using the first %d""" % self.nvoxels)
+            data = data[:self.nvoxels]
+        
         out_data = np.zeros(np.prod(self.volume_grid),dtype=np.float)
         out_data[self.flat_mask] = data
         # Mimic the behavior of DSI Studio
@@ -71,7 +100,7 @@ class Spatial(object):
         if not img.shape[0] == self.volume_grid[0] and \
                img.shape[1] == self.volume_grid[1] and \
                img.shape[2] == self.volume_grid[2]:
-           raise ValueError("%s does not match dMRI volume" % nifti_file)
+            raise ValueError("%s does not match dMRI volume" % nifti_file)
 
         # Convert to LPS+ to match internal coordinates
         dtype = np.int if is_labels else np.float
