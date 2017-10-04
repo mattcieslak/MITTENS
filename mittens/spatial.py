@@ -15,7 +15,7 @@ class Spatial(object):
         else:
             self.real_affine = np.array([])
 
-    def save_nifti(self, data, fname, real_affine=False):
+    def save_nifti(self, data, fname, real_affine=False, is_full_image=False):
         """
         Writes a value for each node into a 3D volume.
         
@@ -36,17 +36,22 @@ class Spatial(object):
         if len(data.shape) > 1:
             sq = data.squeeze()
             if len(sq.shape) > 1:
-                logger.critical("Can only writs out 1D arrays")
+                logger.critical("Can only write out 1D arrays")
                 return
             data = sq
         # Are there extra nodes (eg from atlas regions)?
-        if len(data) > self.nvoxels:
+        if not is_full_image and len(data) > self.nvoxels:
             logger.warning("""
             Non-voxel nodes have values in this data. Only using the first %d""" % self.nvoxels)
             data = data[:self.nvoxels]
         
-        out_data = np.zeros(np.prod(self.volume_grid),dtype=np.float)
-        out_data[self.flat_mask] = data
+        # If the data only corresponds to nodes
+        if not is_full_image:
+            out_data = np.zeros(np.prod(self.volume_grid),dtype=np.float)
+            out_data[self.flat_mask] = data
+        else: # there is a value for each voxel
+            out_data = data
+            
         # Mimic the behavior of DSI Studio
         out_data = out_data.reshape(self.volume_grid, order="F")[::-1,::-1,:]
         if not real_affine:

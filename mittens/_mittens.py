@@ -35,6 +35,9 @@ opposites = [
     ("rpi","las")
     ]
 
+neighborsX = [o[0] for o in opposites] + [o[1] for o in opposites]
+neighborsY = [o[1] for o in opposites] + [o[0] for o in opposites]
+
 class MITTENS(Spatial):
     def __init__(self, fibgz_file="", nifti_prefix="",
             real_affine_image="", mask_image="",
@@ -243,8 +246,10 @@ class MITTENS(Spatial):
             self.volume_grid = mask_img.shape
             self.voxel_size = np.abs(np.diag(mask_img.affine)[:3])
             total_voxels = np.prod(mask_img.shape)
+            # Needs a temporary mask 
             self.flat_mask = np.ones(np.prod(total_voxels),dtype=np.bool)
-            self.flat_mask = self._oriented_nifti_data(self.mask_image).astype(np.bool)
+            # Then fill it in with the real mask
+            self.flat_mask = self._oriented_nifti_data(mask_path).astype(np.bool)
             masked_voxels = self.flat_mask.sum()
             logger.info("Used %s to mask from %d to %d voxels", 
                     self.mask_image, total_voxels, masked_voxels)
@@ -340,7 +345,6 @@ class MITTENS(Spatial):
     def calculate_transition_probabilities(self,output_prefix="mittens"):
         self.estimate_singleODF(output_prefix)
         self.estimate_doubleODF(output_prefix)
-        self.save_nifti(self.flat_mask.astype(np.float), output_prefix + "_mask.nii.gz")
 
         # Write outputs if requested
         if output_prefix:
@@ -359,6 +363,7 @@ class MITTENS(Spatial):
             self.save_nifti(self.doubleODF_codi, output_prefix + "_doubleODF_CoDI.nii.gz")
             self.save_nifti(self.doubleODF_coasy, output_prefix + "_doubleODF_CoAsy.nii.gz")
             self.save_nifti(self.doubleODF_results[:,-1], output_prefix + "_doubleODF_p_not_trackable.nii.gz")
+            self.save_nifti(self.flat_mask.astype(np.float), output_prefix + "_mask.nii.gz", is_full_image=True)
 
     def estimate_singleODF(self, output_prefix=""):
         
@@ -438,11 +443,12 @@ class MITTENS(Spatial):
         # Divide the Columns into two matrices, calculate asymmetry
         half1 = []
         half2 = []
-        for a,b in opposites:
-            half1.append(self.doubleODF_results[:,neighbor_names.index(a)])
-            half2.append(self.doubleODF_results[:,neighbor_names.index(b)])
+        for nbrX,nbrY in zip(neighborsX,neighborsY):
+            half1.append(self.doubleODF_results[:,neighbor_names.index(nbrX)])
+            half2.append(self.doubleODF_results[:,neighbor_names.index(nbrY)])
         half1 = np.column_stack(half1)
         half2 = np.column_stack(half2)
+        
         logger.info("Calculating CoAsy")
         self.doubleODF_coasy = aitchison_asymmetry(half1, half2)
 
