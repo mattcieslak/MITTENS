@@ -1,20 +1,24 @@
 #!/usr/bin/env python
 import numpy as np
 
-def aitchison_distance(null_probs,obs_probs):
+def aitchison_distance(null_probs,obs_probs,
+                       numerator_indices=None, denominator_indices=None):
     """
 
     """
-    out = np.zeros(obs_probs.shape[0], dtype=np.float)
-    idx_pairs = []
-    D = len(null_probs)
-    for i in range(D):
-        for j in range(i):
-            idx_pairs.append(np.array([j,i]))
-    numerator, denominator = np.row_stack(idx_pairs).T
-    aitchison_minus = np.log(null_probs[numerator] / null_probs[denominator])
+    if None in (numerator_indices, denominator_indices):
+        out = np.zeros(obs_probs.shape[0], dtype=np.float)
+        idx_pairs = []
+        D = len(null_probs)
+        for i in range(D):
+            for j in range(i):
+                idx_pairs.append(np.array([j,i]))
+        numerator, denominator = np.row_stack(idx_pairs).T
+    else:
+        numerator, denominator = numerator_indices, denominator_indices
     
     with np.errstate(divide='ignore', invalid='ignore'):
+        aitchison_minus = np.log(null_probs[numerator] / null_probs[denominator])
         for n, obs in enumerate(obs_probs):
             out[n] = np.sqrt(1./D * np.nansum( 
                 (np.log(obs[numerator]/obs[denominator]) - aitchison_minus   )**2 ))

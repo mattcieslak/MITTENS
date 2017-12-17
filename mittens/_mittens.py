@@ -692,3 +692,28 @@ class MITTENS(Spatial):
         vg.graph = G
         return vg
 
+
+    def build_ODF_similarity_graph(self):
+        """
+          
+        """
+
+        G = networkit.graph.Graph(int(self.nvoxels), weighted=True, directed=True)
+            
+        # Add the voxels and their probabilities. This can be sped up probably
+        for j, starting_voxel in tqdm(enumerate(self.voxel_coords),total=self.nvoxels):
+            source_odf = self.odf_values[j]
+            for i, name in enumerate(neighbor_names):
+                coord = tuple(starting_voxel + lps_neighbor_shifts[name])
+                to_node = self.coordinate_lut.get(coord,-9999)
+                if to_node == -9999:
+                    continue
+                target_odf = self.odf_values[i]
+                # Actually adds the edge to the graph
+                G.addEdge(j, to_node, w = prob_weights[i])
+                    
+        vg = self._voxel_graph()    
+        vg.weighting_scheme = purpose
+        vg.graph = G
+        return vg
+
