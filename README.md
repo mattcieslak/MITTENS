@@ -230,5 +230,6 @@ Authors
 -------
  * Matt Cieslak
  * Tegan Brennan
+ * Clint Greene
 
 Logo by Allison Shapiro
