@@ -47,6 +47,7 @@ process_dsi_studio () {
         --method=4 \
         --mask=${mask} \
         --csf_calibration=1 \
+        --record_odf=1 \
         --deconvolution=1 \
         --param2=0.5 \
         --source=${SRCGZ}

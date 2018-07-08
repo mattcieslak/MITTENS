@@ -110,13 +110,26 @@ class Spatial(object):
         # Convert to LPS+ to match internal coordinates
         dtype = np.int if is_labels else np.float
         data = img.get_data().astype(dtype)
-        if img.affine[0,0] > 0:
-            data = data[::-1,:,:]
-            if warn: logger.info("Flipped X in %s", nifti_file)
-        if img.affine[1,1] > 0:
-            data = data[:,::-1,:]
-            if warn: logger.info("Flipped Y in %s", nifti_file)
-        if img.affine[2,2] < 0:
-            data = data[:,:,::-1]
-            if warn: logger.info("Flipped Z in %s", nifti_file)
-        return data.flatten(order="F")[self.flat_mask]
+        return oriented_array_to_lpsplus(data, img.affine, warn=warn
+                                         ).flatten(order="F")[self.flat_mask]
+
+def oriented_array_to_lpsplus(data, affine, warn=True):
+    """ Takes a 3D+ array and returns a view of it 
+    such that the indices increase as their spatial locations
+    become more left, posterior and superior
+    """
+    # Add dummy 4th dimension
+    if data.ndim < 4:
+        data = data[...,np.newaxis]
+        
+    if affine[0,0] > 0:
+        data = data[::-1,:,:]
+        if warn: logger.info("Flipped X")
+    if affine[1,1] > 0:
+        data = data[:,::-1,:]
+        if warn: logger.info("Flipped Y")
+    if affine[2,2] < 0:
+        data = data[:,:,::-1]
+        if warn: logger.info("Flipped Z")
+    return data.squeeze()
+        

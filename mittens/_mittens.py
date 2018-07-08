@@ -15,6 +15,7 @@ import os.path as op
 import networkit
 from .spatial import Spatial
 from .voxel_graph import VoxelGraph
+from .external import load_mif, load_fib
 
 
 DISCONNECTED=999999999
@@ -39,25 +40,23 @@ neighborsX = [o[0] for o in opposites] + [o[1] for o in opposites]
 neighborsY = [o[1] for o in opposites] + [o[0] for o in opposites]
 
 class MITTENS(Spatial):
-    def __init__(self, odf_file="", odf_array = "", nifti_prefix="",
-            real_affine_image="", mask_image="",
-            step_size=np.sqrt(3)/2. , angle_max=35, odf_resolution="odf8", 
-            angle_weights="flat", angle_weighting_power=1.,normalize_doubleODF=True):
+    def __init__(self, reconstruction="", 
+                 odf_array = "", nifti_prefix="",
+                 real_affine_image="", mask_image="",
+                 step_size=np.sqrt(3)/2. , angle_max=35, odf_resolution="odf8", 
+                 angle_weights="flat", angle_weighting_power=1.,normalize_doubleODF=True):
         """
         Represents a voxel graph.  Can be constructed with a DSI Studio ``fib.gz``
         file or from NIfTI files or a voxel graph matfile. 
 
-        Parameters:
-        ===========
-
-        odf_file:str
-          Path to a mrtrix amplitudes nii.gz file or dsi studio fib.gz file
-        odf_array:numpy array
-          Array of odf data sampled from a symmetric sphere, default is 321 directions (odf8).
-          Requires real_affine_image path. Assumes RAS orientation.
+        Input Options:
+        ==============
+        reconstruction:str
+          Path to a DSI Studio fib.gz or MRTRIX mif file containing the (f)ODFs
+          on which to calculate transition probabilities.
         nifti_prefix:str
-          Prefix used when calculating singleODF and/or doubleODF transition
-          probabilities.
+          Prefix used when for saving or loading singleODF and/or doubleODF transition
+          probabilities to/from NIfTI files.
         real_affine_image:str
           Path to a NIfTI file that contains the real affine mapping for the
           data. DSI Studio does not preserve affine mappings. If provided, 
@@ -66,6 +65,9 @@ class MITTENS(Spatial):
         mask_image:str
           Path to a NIfTI file that has nonzero values in voxels that will be used
           as nodes in the graph.  If none is provided, the default mask estimated from the ODFs is used.
+          
+        Analytic Tractography Options:
+        ==============================
         step_size:float
           Step size in voxel units. Used for calculating transition probabilities
         angle_max:float
@@ -81,6 +83,26 @@ class MITTENS(Spatial):
           Should the transition probabilities from doubleODF be forced to sum to 1?
 
 
+        Examples:
+        ========
+        Load FODs from MRTRIX3
+        >>> from mittens import MITTENS
+        >>> fod_mitn = MITTENS(reconstruction="dwi_csd_fod.mif", mask_image="dwi_mask.mif",
+        ...                nifti_prefix="from_mrtrix_")
+        
+        Load from DSI Studio. An original single-volume b0 image with a
+        correct affine exists in "orig_b0.nii.gz"
+        >>> dsi_mitn = MITTENS(fibgz_input="deconvolved_gqi.fib.gz", 
+        ...                real_affine_image="orig_b0.nii.gz",
+        ...                nifti_prefix="from_dsi_studio_")
+        
+        Load the results you would get from running the previous analyses
+        >>> dsi_transprobs = MITTENS(nifti_prefix="from_dsi_studio_")
+        >>> fod_transprobs = MITTENS(nifti_prefix="from_mrtrix_")
+        
+        If using Dipy, save the output in DSI Studio format and import it
+        that way. 
+        
         Note:
         =====
         The combination of odf_resolution, angle_max, angle_weights and angle_weighting
@@ -88,23 +110,12 @@ class MITTENS(Spatial):
         If you're unable to initialize a MITTENS object with your desired combination,
         try downloading or generating/compiling the necessary Fortran modules.
         """
-        if odf_file == "" and nifti_prefix == "" and type(odf_array) == str:
-            raise ValueError("Must provide either a DSI Studio fib file, nifti ODF file, ODF array, or prefix to "
-                    "NIfTI1 images written out by a previous run")
-        # These will get filled out from loading a fibgz or niftis
-        self.flat_mask = None
-        self.nvoxels = None
-        self.voxel_size = None
-        self.voxel_coords = None
-        self.coordinate_lut = None
-        self.label_lut = None
-        self.atlas_labels = None
-        self.mask_image = mask_image
+        
         # From args
         self.step_size = step_size
         self.odf_resolution = odf_resolution
         self.angle_max = angle_max
-        self.orientation = None
+        self.orientation = "lps"
         self.angle_weights = angle_weights
         self.normalize_doubleODF = normalize_doubleODF
         self.angle_weighting_power = angle_weighting_power
@@ -118,20 +129,51 @@ class MITTENS(Spatial):
                 get_transition_analysis_matrices(self.odf_resolution, self.angle_max,
                         self.angle_weights, self.angle_weighting_power)
         self.n_unique_vertices = self.odf_vertices.shape[0]//2
-        self._initialize_nulls()
-        self._set_real_affine(real_affine_image)
-
-        if odf_file:
-            logger.info("Loading ODF file")
-            self._load_odf(odf_file)
-        if  np.ndarray == type(odf_array):
-            if not real_affine_image: raise ValueError("Must specify path to the NIFTI volume containing the affine")
-            logger.info("Loading ODF array")
-            self._load_odf_array(odf_array)
-        if nifti_prefix:
-            logger.info("Loading output from pre-existing NIfTIs")
+        
+        # Load input data and get spatial info
+        self.label_lut = None
+        self.atlas_labels = None
+        self.mask_image = mask_image
+        
+        
+        def set_ras_affine(voxel_size):
+            aff = np.ones(4,dtype=np.float)
+            aff[:3] = voxel_size		
+            self.ras_affine = np.diag(aff)
+            
+        if reconstruction.endswith(".mif"):
+            self.flat_mask, self.volume_grid, self.odf_values, \
+            self.real_affine, self.voxel_size = \
+                load_mif(reconstruction, sphere=odf_resolution, mask=mask_image)
+            set_ras_affine(self.voxel_size)
+            
+        elif reconstruction.endswith(".fib") or reconstruction.endswith(".fib.gz"):
+            self.flat_mask, self.volume_grid, self.odf_values, \
+            self.real_affine, self.voxel_size = \
+                load_fib(reconstruction, self.odf_vertices, 
+                         real_affine_image=real_affine_image)
+            set_ras_affine(self.voxel_size)
+            
+        elif not nifti_prefix == "":
             self._load_niftis(nifti_prefix)
+       
+        else:
+            logger.critical("No valid inputs detected")
+        
+        # Coordinate mapping information 
+        self.nvoxels = self.flat_mask.sum()
+        self.voxel_coords = np.array(np.unravel_index(
+            np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
+        self.coordinate_lut = dict(
+            [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
 
+        norm_factor = self.odf_values.sum(1)
+        norm_factor[norm_factor == 0] = 1.
+        self.odf_values = self.odf_values / norm_factor[:,np.newaxis] * 0.5
+        logger.info("Loaded ODF data: %s",str(self.odf_values.shape))
+        
+        self._initialize_nulls()
+        
     def _initialize_nulls(self):
 
         # Note, only entries for unique vertices are created, but they 
@@ -162,106 +204,6 @@ class MITTENS(Spatial):
         if self.normalize_doubleODF:
             self.doubleODF_null_probs = self.doubleODF_null_probs / self.doubleODF_null_probs.sum()
 
-    def _load_odf_array(self, odf_array):
-        self.volume_grid = odf_array.shape[:3]
-        aff = np.ones(4,dtype=np.float)
-        aff[:3] = self.real_affine[0][0]		
-        self.ras_affine = np.diag(aff)
-        numSamples = odf_array.shape[-1]//2
-        odf_array = odf_array[::-1,::-1,:,:numSamples]
-        odf_array = odf_array.reshape(np.prod(odf_array.shape[:3]),odf_array.shape[-1], order="F")
-        odf_array[odf_array < 0] = 0
-        odf_sum = odf_array.sum(1)
-        odf_sum_mask = odf_sum > 0
-        if op.exists(self.mask_image):
-            mask = nib.load(self.mask_image)
-            self.flat_mask = mask.get_data()
-            self.flat_mask = self.flat_mask[::-1,::-1,:]
-            self.flat_mask = self.flat_mask.flatten(order="F") > 0
-        else:
-            self.flat_mask = np.ones(self.volume_grid, dtype = np.bool).flatten()
-        self.flat_mask = odf_sum_mask & self.flat_mask
-        self.odf_values = odf_array[self.flat_mask,:].astype(np.float64)
-
-        self.nvoxels = self.flat_mask.sum()
-        self.voxel_coords = np.array(np.unravel_index(
-            np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
-        self.coordinate_lut = dict(
-            [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
-
-        norm_factor = self.odf_values.sum(1)
-        norm_factor[norm_factor == 0] = 1.
-        self.odf_values = self.odf_values / norm_factor[:,np.newaxis] * 0.5
-        logger.info("Loaded ODF data: %s",str(self.odf_values.shape))
-        self.orientation = "lps"
-
-    def _load_odf(self, path):
-        logger.info("Loading %s", path)
-        if path.find("nii") > 0:
-            mrodfs = nib.load(path)
-            self.volume_grid = mrodfs.shape[:3]
-            print("Loading mrTRIX FOD file")
-            if op.exists(self.mask_image):
-                mrmask = nib.load(self.mask_image)
-                self.flat_mask = mrmask.get_data()
-                self.flat_mask = self.flat_mask[::-1,::-1,:]
-                self.flat_mask = self.flat_mask.flatten(order="F") > 0
-            else:
-                self.flat_mask = np.ones(self.volume_grid, dtype = np.bool).flatten()
-            aff = np.ones(4,dtype=np.float)
-            aff[:3] = mrodfs.header.get_zooms()[0]
-            odfs = mrodfs.get_data()
-            odfs = odfs[::-1,::-1,:,:]
-            odfs = odfs.reshape(np.prod(odfs.shape[:3]),odfs.shape[-1], order="F")
-            odf_sum = odfs.sum(1)
-            odf_sum_mask = odf_sum > 0
-            self.flat_mask = odf_sum_mask & self.flat_mask
-            #self.flat_mask[vox_mask_inds[~odf_sum_mask]] = False
-            self.odf_values = odfs[self.flat_mask,:].astype(np.float64)
-
-        else:
-            f = load_fibgz(path)
-            self.volume_grid = f['dimension'].squeeze()
-            aff = np.ones(4,dtype=np.float)
-            aff[:3] = f['voxel_size'].squeeze()
-            # Create a contiguous ODF matrix, skipping all zero rows
-            logger.info("Loading DSI Studio ODF data")
-            odf_vars = [k for k in f.keys() if re.match("odf\\d+",k)]
-            valid_odfs = []
-            self.flat_mask = f["fa0"].squeeze() > 0 
-            for n in range(len(odf_vars)):
-                varname = "odf%d" % n
-                odfs = f[varname]
-                odf_sum = odfs.sum(0)
-                odf_sum_mask = odf_sum > 0
-                valid_odfs.append(odfs[:,odf_sum_mask].T)
-
-            self.odf_values = np.row_stack(valid_odfs).astype(np.float64)
-
-        self.orientation = "lps"
-        logger.info("Loaded %s", path)
-        # Check that this fib file matches what we expect
-        #fib_odf_vertices = f['odf_vertices'].T
-        #matches = np.allclose(self.odf_vertices, fib_odf_vertices)
-        #if not matches:
-            #logger.critical("ODF Angles in fib file do not match %s", self.odf_resolution)
-            #return
-        # DSI Studio stores data in LPS+
-        #aff = aff * np.array([-1,-1,1,1])
-        self.ras_affine = np.diag(aff)
-        self.voxel_size = aff[:3]
-
-        # Coordinate mapping information from fib file
-        self.nvoxels = self.flat_mask.sum()
-        self.voxel_coords = np.array(np.unravel_index(
-            np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
-        self.coordinate_lut = dict(
-            [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
-
-        norm_factor = self.odf_values.sum(1)
-        norm_factor[norm_factor == 0] = 1.
-        self.odf_values = self.odf_values / norm_factor[:,np.newaxis] * 0.5
-        logger.info("Loaded ODF data: %s",str(self.odf_values.shape))
 
     def _load_niftis(self,input_prefix):
         # If there is an external mask, use it before loading the niftis
