@@ -899,6 +899,14 @@ class VoxelGraph(Spatial):
             selected_coords = self.voxel_coords[selected_nodes][:,np.array([0,1])]
         else:
             raise ValueError
+        
+        if self.weighting_scheme in ("negative_log_p", "minus_iso_negative_log", 
+                                     "minus_iso_scaled_negative_log"):
+            logger.info("Arrows scaled by np.exp(-weight) because weighting scheme is %s",
+                        self.weighting_scheme)
+        else:
+            logger.info("Arrows scaled by weight because weighting scheme is %s",
+                        self.weighting_scheme)
     
         max_scale_fac = quiveropts['clim'][1]
         coords = []
@@ -907,8 +915,14 @@ class VoxelGraph(Spatial):
         for from_node_index, from_node in enumerate(selected_nodes):
             for to_node_index, to_node in enumerate(selected_nodes):
                 if from_node == to_node or not self.graph.hasEdge(from_node,to_node): continue
-                weight = np.exp(-self.graph.weight(from_node, to_node))
+                
+                # Ensure that big arrows correspond to big connectivity 
+                weight = self.graph.weight(from_node, to_node)                
+                if self.weighting_scheme in ("negative_log_p", "minus_iso_negative_log", 
+                                             "minus_iso_scaled_negative_log"):
+                    weight = np.exp(-weight)
                 if weight < min_weight: continue
+                
                 weights.append(weight)
                 # Which direction should the arrow be pointing?
                 dir_vec = unit_vector(selected_coords[to_node_index] - selected_coords[from_node_index])
