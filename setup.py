@@ -21,7 +21,7 @@ if __name__ == "__main__":
                               "Tract Transition Expections requiring No Simulations",
           author            = "Matt Cieslak, Tegan Brennan",
           author_email      = "cieslak@psych.ucsb.edu",
-          install_requires  = ["numpy", "scikit-learn", "tqdm", "networkit"],
+          install_requires  = ["numpy", "scikit-learn", "tqdm", "networkit", "nibabel", "dipy"],
           classifiers=[
               # Get strings from
               # http://pypi.python.org/pypi?%3Aaction=list_classifiers

@@ -20,21 +20,24 @@ from DSI Studio is supported.
 
 ## Installation
 
-MITTENS only works in Python 3 because of its dependency on ``networkit``.
-It requires a fork of ``networkit`` that can be installed like so:
-
-```bash
-git clone https://github.com/tsbrennan1/networkit.git
-cd networkit
-pip install -e .
-```
-
 NOTE: On Mac OS you may need to specify the path to a recent c++
-compiler. E.g. ``export CXX=/usr/local/bin/g++-7``.
+compiler (download gcc-8 from homebrew) E.g. ``export CXX=/usr/local/bin/g++-8``. You might also 
+need to edit the setup.py script to include 
+
+```
+# initialize Extension module with the appropriate source file
+modules = [Extension("_NetworKit",
+        src,
+        language = "c++",
+        extra_compile_args=["-fopenmp", "-std={}".format(stdflag), "-O3", "-DNOGTEST"],
+        extra_link_args=['-fopenmp', "-std={}".format(stdflag),'-lgomp', '-Wl,-rpath,/usr/local/opt/gcc/lib/gcc/8/'], # <- NEW!
+        libraries=["NetworKit-Core-{0}".format(optimize)],
+        library_dirs=["./"])]
+```
 
 While this software can be installed like any other python package,
 it is possible to add custom compiled functions before installation.
-Analytical tractography requires the specification of a set of geometric
+Analytic tractography requires the specification of a set of geometric
 constraints for inter-voxel tract transition expectations can be
 solved. MITTENS comes with the functions used to perform the analyses
 described in [our paper], but nothing more.
