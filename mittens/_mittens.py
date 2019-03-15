@@ -141,24 +141,30 @@ class MITTENS(Spatial):
             aff[:3] = voxel_size		
             self.ras_affine = np.diag(aff)
             
-        if reconstruction.endswith(".mif"):
-            self.flat_mask, self.volume_grid, self.odf_values, \
-            self.real_affine, self.voxel_size = \
-                load_mif(reconstruction, sphere=odf_resolution, mask=mask_image)
-            set_ras_affine(self.voxel_size)
-            
-        elif reconstruction.endswith(".fib") or reconstruction.endswith(".fib.gz"):
-            self.flat_mask, self.volume_grid, self.odf_values, \
-            self.real_affine, self.voxel_size = \
-                load_fib(reconstruction, self.odf_vertices, 
-                         real_affine_image=real_affine_image)
-            set_ras_affine(self.voxel_size)
-            
-        elif not nifti_prefix == "":
+        if not nifti_prefix == "":
             self._load_niftis(nifti_prefix)
-       
         else:
-            logger.critical("No valid inputs detected")
+            if reconstruction.endswith(".mif"):
+                self.flat_mask, self.volume_grid, self.odf_values, \
+                self.real_affine, self.voxel_size = \
+                    load_mif(reconstruction, sphere=odf_resolution, mask=mask_image)
+                set_ras_affine(self.voxel_size)
+                
+            elif reconstruction.endswith(".fib") or reconstruction.endswith(".fib.gz"):
+                self.flat_mask, self.volume_grid, self.odf_values, \
+                self.real_affine, self.voxel_size = \
+                    load_fib(reconstruction, self.odf_vertices, 
+                             real_affine_image=real_affine_image)
+                set_ras_affine(self.voxel_size)
+            else:
+                logger.critical("No valid inputs detected")
+            
+            # Adjust the ODF values
+            norm_factor = self.odf_values.sum(1)
+            norm_factor[norm_factor == 0] = 1.
+            self.odf_values = self.odf_values / norm_factor[:,np.newaxis] * 0.5
+            logger.info("Loaded ODF data: %s",str(self.odf_values.shape))
+       
         
         # Coordinate mapping information 
         self.nvoxels = self.flat_mask.sum()
@@ -166,11 +172,6 @@ class MITTENS(Spatial):
             np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
         self.coordinate_lut = dict(
             [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
-
-        norm_factor = self.odf_values.sum(1)
-        norm_factor[norm_factor == 0] = 1.
-        self.odf_values = self.odf_values / norm_factor[:,np.newaxis] * 0.5
-        logger.info("Loaded ODF data: %s",str(self.odf_values.shape))
         
         self._initialize_nulls()
         
@@ -188,8 +189,6 @@ class MITTENS(Spatial):
             singleODF_null_probs.append( self.singleODF_funcs[k](
                     self.isotropic, self.prob_angles_weighted))
         self.singleODF_null_probs = np.array(singleODF_null_probs)
-        #if not self.singleODF_null_probs.sum() == 1.:
-        #    raise ValueError("Null probailities do not add up to 1. Check Fortran")
 
         # Double ODF Model
         self.doubleODF_funcs = self.get_prob_funcs("doubleODF")
@@ -291,25 +290,22 @@ class MITTENS(Spatial):
 
         # Function lookup for neighbors
         neighbor_functions = {}
+        logger.info("Assuming ODF vertices are LPS+")
         for nbr_name in neighbor_names:
-            # Flip the x,y to match dsi studio if lps
-            if self.orientation == "lps":
-                if "r" in nbr_name:
-                    rl = nbr_name.replace("r", "l")
-                elif "l" in nbr_name:
-                    rl = nbr_name.replace("l", "r")
-                else:
-                    rl = nbr_name
-
-                if "a" in rl:
-                    ap = nbr_name.replace("a","p")
-                elif "p" in rl:
-                    ap = nbr_name.replace("p", "a")
-                else:
-                    ap = rl
-                neighbor_functions[ap] = getattr(module, ap+"_prob")
+            if "r" in nbr_name:
+                rl = nbr_name.replace("r", "l")
+            elif "l" in nbr_name:
+                rl = nbr_name.replace("l", "r")
             else:
-                neighbor_functions[nbr_name] = getattr(module, nbr_name+"_prob")
+                rl = nbr_name
+
+            if "a" in rl:
+                ap = rl.replace("a","p")
+            elif "p" in rl:
+                ap = rl.replace("p", "a")
+            else:
+                ap = rl
+            neighbor_functions[nbr_name] = getattr(module, ap+"_prob")
 
         return neighbor_functions
 
