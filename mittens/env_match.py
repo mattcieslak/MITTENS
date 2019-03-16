@@ -14,6 +14,33 @@ from .external import load_fixels_from_fib
 logger = logging.getLogger(__name__)
 
 
+def fixel_similarity(fixels1, fixels2):
+    """Calculate the similarity between th sets of fixels in voxel 1 and voxel 2.
+
+    At the moment this is a placeholder that returns the 1 / the difference in the
+    number of fixels in the two voxels.
+
+    Parameters
+    ----------
+        fixels1: np.ndarray (n x 3)
+            Each row is a fixel vector from voxel 1.
+        fixels2: np.ndarray (n x 3)
+            Each row is a fixel vector from voxel 2.
+
+    Returns
+    -------
+        similarity: float
+            The RMSD of the two sets of fixels.
+    """
+
+    nfixels1 = fixels1.shape[0]
+    nfixels2 = fixels2.shape[0]
+    num_different_fixels = np.abs(nfixels1 - nfixels2)
+    if num_different_fixels == 0:
+        return 1.
+    return 1. / num_different_fixels
+
+
 class EnvironmentMatch(Spatial):
     def __init__(self, fixel_threshold=0, reconstruction="", nifti_prefix="",
                  real_affine_image="", mask_image="", cutoff_value=0.3):
@@ -49,6 +76,7 @@ class EnvironmentMatch(Spatial):
         self.atlas_labels = None
         self.mask_image = mask_image
         self.cutoff_value = cutoff_value
+        self.real_affine = None
 
         if reconstruction.endswith(".fib") or reconstruction.endswith(".fib.gz"):
             self.fixels, self.flat_mask, self.volume_grid, \
@@ -62,6 +90,10 @@ class EnvironmentMatch(Spatial):
             logger.critical("No valid inputs detected")
 
         self.nvoxels = self.flat_mask.sum()
+
+        if op.exists(real_affine_image):
+            self._set_real_affine(real_affine_image)
+
 
     def environment_similarity_graph(self, output_prefix="env_match"):
         """Calculate peak set similarity in each voxel and its neighbors"""
@@ -77,8 +109,7 @@ class EnvironmentMatch(Spatial):
                 if to_node == -9999:
                     continue
                 to_node_fixels = self.fixels[nbr_coord]
-                similarity = fixel_similarity(from_node_fixels, to_node_fixels,
-                                              cutoff_value=self.cutoff_value)
+                similarity = fixel_similarity(from_node_fixels, to_node_fixels)
                 G.addEdge(from_node, to_node, w=similarity)
 
         vg = self._voxel_graph()

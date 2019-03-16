@@ -12,22 +12,23 @@ class Spatial(object):
         if affine_img:
             img = nib.load(affine_img)
             self.real_affine = img.affine
+            self.real_affine_image = affine_img
         else:
             self.real_affine = np.array([])
 
     def save_nifti(self, data, fname, real_affine=False, is_full_image=False):
         """
         Writes a value for each node into a 3D volume.
-        
+
         Parameters:
         ===========
-        
+
         data:np.ndarray
           A value for each voxel (node) in the graph.
-          
+
         fname:str
           Path where the output nifti file goes. Must end with .nii or .nii.gz
-          
+
         real_affine:bool
           Should the NIfTI file include a real affine (True) or use the default
           DSI Studio output space (False)
@@ -44,14 +45,14 @@ class Spatial(object):
             logger.warning("""
             Non-voxel nodes have values in this data. Only using the first %d""" % self.nvoxels)
             data = data[:self.nvoxels]
-        
+
         # If the data only corresponds to nodes
         if not is_full_image:
             out_data = np.zeros(np.prod(self.volume_grid),dtype=np.float)
             out_data[self.flat_mask] = data
         else: # there is a value for each voxel
             out_data = data
-            
+
         # Mimic the behavior of DSI Studio
         out_data = out_data.reshape(self.volume_grid, order="F")[::-1,::-1,:]
         if not real_affine:
@@ -114,14 +115,14 @@ class Spatial(object):
                                          ).flatten(order="F")[self.flat_mask]
 
 def oriented_array_to_lpsplus(data, affine, warn=True):
-    """ Takes a 3D+ array and returns a view of it 
+    """ Takes a 3D+ array and returns a view of it
     such that the indices increase as their spatial locations
     become more left, posterior and superior
     """
     # Add dummy 4th dimension
     if data.ndim < 4:
         data = data[...,np.newaxis]
-        
+
     if affine[0,0] > 0:
         data = data[::-1,:,:]
         if warn: logger.info("Flipped X")
@@ -132,4 +133,3 @@ def oriented_array_to_lpsplus(data, affine, warn=True):
         data = data[:,:,::-1]
         if warn: logger.info("Flipped Z")
     return data.squeeze()
-        

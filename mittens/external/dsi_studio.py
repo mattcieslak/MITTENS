@@ -57,7 +57,7 @@ def fast_load_fibgz(fib_file):
 
 def load_fixels_from_fib(fib_file, fixel_threshold=0):
     f = fast_load_fibgz(fib_file)
-    volume_grid = f['dimension'].squeeze()
+    volume_grid = f['dimension'].squeeze().astype(np.int)
     voxel_size = f['voxel_size'].squeeze()
     fib_odf_vertices = f['odf_vertices'].T
 
