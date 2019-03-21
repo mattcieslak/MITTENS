@@ -21,8 +21,8 @@ from DSI Studio is supported.
 ## Installation
 
 NOTE: On Mac OS you may need to specify the path to a recent c++
-compiler (download gcc-8 from homebrew) E.g. ``export CXX=/usr/local/bin/g++-8``. You might also 
-need to edit the setup.py script to include 
+compiler (download gcc-8 from homebrew) E.g. ``export CXX=/usr/local/bin/g++-8``. You might also
+need to edit the setup.py script to include
 
 ```
 # initialize Extension module with the appropriate source file
@@ -115,7 +115,7 @@ DSI Studio files are read directly by MITTENS:
 
 ```python
 >>> from mittens import MITTENS
->>> mitns = MITTENS(input_fib="HCP.src.gz.odf8.f5rec.fy.gqi.1.25.fib.gz")
+>>> mitns = MITTENS(reconstruction="HCP.src.gz.odf8.f5rec.fy.gqi.1.25.fib.gz")
 ```
 
 From here you can estimate none-ahead or one-ahead, where NIfTI-1 files are
