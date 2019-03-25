@@ -3,6 +3,10 @@
 *.nii.gz
 *.fib
 *.fib.gz
+*.mif
+*.mif.gz
+*.txt
+*.tck
 
 # vim
 *.swp
