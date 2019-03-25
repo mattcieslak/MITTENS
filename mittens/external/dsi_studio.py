@@ -30,7 +30,7 @@ def fast_load_fibgz(fib_file):
     def find_zcat():
         def is_exe(fpath):
             return os.path.exists(fpath) and os.access(fpath, os.X_OK)
-        for program in ["zcat", "gzcat"]:
+        for program in ["gzcat", "zcat"]:
             for path in os.environ["PATH"].split(os.pathsep):
                 path = path.strip('"')
                 exe_file = os.path.join(path, program)
@@ -41,8 +41,9 @@ def fast_load_fibgz(fib_file):
     # Check if a zcat is available on this system:
     zcatter = find_zcat()
     if zcatter is not None:
-        p = subprocess.Popen([zcatter, fib_file],stdout=subprocess.PIPE)
+        p = subprocess.Popen([zcatter, fib_file], stdout=subprocess.PIPE)
         fh = StringIO(p.communicate()[0])
+        assert p.returncode == 0
         return loadmat(fh)
 
     with gzip.open(fib_file,"r") as f:
@@ -90,7 +91,7 @@ def load_fixels_from_fib(fib_file, fixel_threshold=0):
 def load_fib(fib_file, expected_vertices=None,
              real_affine_image=None,sphere="odf8"):
     f = fast_load_fibgz(fib_file)
-    volume_grid = f['dimension'].squeeze()
+    volume_grid = f['dimension'].squeeze().astype(np.int)
     voxel_size = f['voxel_size'].squeeze()
 
     # Check that this fib file matches what we expect

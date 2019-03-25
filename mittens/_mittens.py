@@ -3,12 +3,12 @@ from .fib_io import load_fibgz
 import numpy as np
 import re
 import importlib
-from .utils import (neighbor_names, get_transition_analysis_matrices, 
-        lps_neighbor_shifts, weight_transition_probabilities_by_odf, 
+from .utils import (neighbor_names, get_transition_analysis_matrices,
+        lps_neighbor_shifts, weight_transition_probabilities_by_odf,
         compute_weights_as_neighbor_voxels, ras_neighbor_shifts)
 import logging
 from tqdm import tqdm
-from .distances import (kl_distance, aitchison_distance,  
+from .distances import (kl_distance, aitchison_distance,
                         aitchison_asymmetry)
 import nibabel as nib
 import os.path as op
@@ -40,14 +40,14 @@ neighborsX = [o[0] for o in opposites] + [o[1] for o in opposites]
 neighborsY = [o[1] for o in opposites] + [o[0] for o in opposites]
 
 class MITTENS(Spatial):
-    def __init__(self, reconstruction="", 
+    def __init__(self, reconstruction="",
                  odf_array = "", nifti_prefix="",
                  real_affine_image="", mask_image="",
-                 step_size=np.sqrt(3)/2. , angle_max=35, odf_resolution="odf8", 
+                 step_size=np.sqrt(3)/2. , angle_max=35, odf_resolution="odf8",
                  angle_weights="flat", angle_weighting_power=1.,normalize_doubleODF=True):
         """
         Represents a voxel graph.  Can be constructed with a DSI Studio ``fib.gz``
-        file or from NIfTI files or a voxel graph matfile. 
+        file or from NIfTI files or a voxel graph matfile.
 
         Input Options:
         ==============
@@ -59,19 +59,19 @@ class MITTENS(Spatial):
           probabilities to/from NIfTI files.
         real_affine_image:str
           Path to a NIfTI file that contains the real affine mapping for the
-          data. DSI Studio does not preserve affine mappings. If provided, 
+          data. DSI Studio does not preserve affine mappings. If provided,
           all NIfTI outputs will be written with this affine. Otherwise the
           default affine from DSI Studio will be used.
         mask_image:str
           Path to a NIfTI file that has nonzero values in voxels that will be used
           as nodes in the graph.  If none is provided, the default mask estimated from the ODFs is used.
-          
+
         Analytic Tractography Options:
         ==============================
         step_size:float
           Step size in voxel units. Used for calculating transition probabilities
         angle_max:float
-          Maximum turning angle in degrees. Used for calculating transition 
+          Maximum turning angle in degrees. Used for calculating transition
           probabilities.
         odf_resolution:str
           ODF tesselation used in DSI Studio. Options are {"odf4", "odf6", "odf8"}.
@@ -89,20 +89,20 @@ class MITTENS(Spatial):
         >>> from mittens import MITTENS
         >>> fod_mitn = MITTENS(reconstruction="dwi_csd_fod.mif", mask_image="dwi_mask.mif",
         ...                nifti_prefix="from_mrtrix_")
-        
+
         Load from DSI Studio. An original single-volume b0 image with a
         correct affine exists in "orig_b0.nii.gz"
-        >>> dsi_mitn = MITTENS(fibgz_input="deconvolved_gqi.fib.gz", 
+        >>> dsi_mitn = MITTENS(fibgz_input="deconvolved_gqi.fib.gz",
         ...                real_affine_image="orig_b0.nii.gz",
         ...                nifti_prefix="from_dsi_studio_")
-        
+
         Load the results you would get from running the previous analyses
         >>> dsi_transprobs = MITTENS(nifti_prefix="from_dsi_studio_")
         >>> fod_transprobs = MITTENS(nifti_prefix="from_mrtrix_")
-        
+
         If using Dipy, save the output in DSI Studio format and import it
-        that way. 
-        
+        that way.
+
         Note:
         =====
         The combination of odf_resolution, angle_max, angle_weights and angle_weighting
@@ -110,7 +110,7 @@ class MITTENS(Spatial):
         If you're unable to initialize a MITTENS object with your desired combination,
         try downloading or generating/compiling the necessary Fortran modules.
         """
-        
+
         # From args
         self.step_size = step_size
         self.odf_resolution = odf_resolution
@@ -122,25 +122,26 @@ class MITTENS(Spatial):
         logger.info("\nUsing\n------\n  Step Size:\t\t%.4f Voxels \n  ODF Resolution:\t"
                 "%s\n  Max Angle:\t\t%.2f Degrees\n"
                 "  Angle Weights:\t%s\n  Angle weight power:\t%.1f",
-                self.step_size, self.odf_resolution, self.angle_max, 
+                self.step_size, self.odf_resolution, self.angle_max,
                 self.angle_weights,self.angle_weighting_power)
         # Get matrices we'll need for analysis
         self.odf_vertices, self.prob_angles_weighted = \
                 get_transition_analysis_matrices(self.odf_resolution, self.angle_max,
                         self.angle_weights, self.angle_weighting_power)
         self.n_unique_vertices = self.odf_vertices.shape[0]//2
-        
+        self.real_affine = np.eye(4)
+
         # Load input data and get spatial info
         self.label_lut = None
         self.atlas_labels = None
         self.mask_image = mask_image
-        
-        
+
+
         def set_ras_affine(voxel_size):
             aff = np.ones(4,dtype=np.float)
-            aff[:3] = voxel_size		
+            aff[:3] = voxel_size
             self.ras_affine = np.diag(aff)
-            
+
         if not nifti_prefix == "":
             self._load_niftis(nifti_prefix)
         else:
@@ -149,39 +150,39 @@ class MITTENS(Spatial):
                 self.real_affine, self.voxel_size = \
                     load_mif(reconstruction, sphere=odf_resolution, mask=mask_image)
                 set_ras_affine(self.voxel_size)
-                
+
             elif reconstruction.endswith(".fib") or reconstruction.endswith(".fib.gz"):
                 self.flat_mask, self.volume_grid, self.odf_values, \
                 self.real_affine, self.voxel_size = \
-                    load_fib(reconstruction, self.odf_vertices, 
+                    load_fib(reconstruction, self.odf_vertices,
                              real_affine_image=real_affine_image)
                 set_ras_affine(self.voxel_size)
             else:
                 logger.critical("No valid inputs detected")
-            
+
             # Adjust the ODF values
             norm_factor = self.odf_values.sum(1)
             norm_factor[norm_factor == 0] = 1.
             self.odf_values = self.odf_values / norm_factor[:,np.newaxis] * 0.5
             logger.info("Loaded ODF data: %s",str(self.odf_values.shape))
-       
-        
-        # Coordinate mapping information 
+
+
+        # Coordinate mapping information
         self.nvoxels = self.flat_mask.sum()
         self.voxel_coords = np.array(np.unravel_index(
             np.flatnonzero(self.flat_mask), self.volume_grid, order="F")).T
         self.coordinate_lut = dict(
             [(tuple(coord), n) for n,coord in enumerate(self.voxel_coords)])
-        
+
         self._initialize_nulls()
-        
+
     def _initialize_nulls(self):
 
-        # Note, only entries for unique vertices are created, but they 
+        # Note, only entries for unique vertices are created, but they
         # are divided by the total number of vertices.
         self.isotropic = np.ones(self.n_unique_vertices,dtype=np.float64) / \
                 self.odf_vertices.shape[0]
-        
+
         # Single ODF Model
         self.singleODF_funcs = self.get_prob_funcs("singleODF")
         singleODF_null_probs = []
@@ -199,7 +200,7 @@ class MITTENS(Spatial):
             doubleODF_null_probs.append( self.doubleODF_funcs[k](
                     self.isotropic, isotropic_x2, self.prob_angles_weighted))
         self.doubleODF_null_probs = np.array(doubleODF_null_probs)
-        self.doubleODF_null_probs[np.isnan(self.doubleODF_null_probs)]= 0 
+        self.doubleODF_null_probs[np.isnan(self.doubleODF_null_probs)]= 0
         if self.normalize_doubleODF:
             self.doubleODF_null_probs = self.doubleODF_null_probs / self.doubleODF_null_probs.sum()
 
@@ -214,21 +215,21 @@ class MITTENS(Spatial):
             mask_path = possible_mask
         else:
             mask_path = ""
-            
+
         if op.exists(mask_path):
             mask_img = nib.load(mask_path)
             self.volume_grid = mask_img.shape
             self.voxel_size = np.abs(np.diag(mask_img.affine)[:3])
             total_voxels = np.prod(mask_img.shape)
-            # Needs a temporary mask 
+            # Needs a temporary mask
             self.flat_mask = np.ones(np.prod(total_voxels),dtype=np.bool)
             # Then fill it in with the real mask
             self.flat_mask = self._oriented_nifti_data(mask_path).astype(np.bool)
             masked_voxels = self.flat_mask.sum()
-            logger.info("Used %s to mask from %d to %d voxels", 
+            logger.info("Used %s to mask from %d to %d voxels",
                     self.mask_image, total_voxels, masked_voxels)
             external_mask = True
-            
+
         logger.info("Loading singleODF results")
         singleODF_data = []
         for a in neighbor_names:
@@ -238,7 +239,7 @@ class MITTENS(Spatial):
             logger.info("Loading NIfTI Image %s", outf)
             # Assumes niftis were written by MITTENS
             tmp_img = nib.load(outf)
-            if any([tmp_img.affine[0,0] < 0, tmp_img.affine[1,1] < 0, 
+            if any([tmp_img.affine[0,0] < 0, tmp_img.affine[1,1] < 0,
                 tmp_img.affine[2,2] < 0]):
                 logger.warn("NIfTI may not have come from MITTENS.")
             if external_mask:
@@ -250,7 +251,7 @@ class MITTENS(Spatial):
         final_img = nib.load(outf)
         self.ras_affine = final_img.affine
 
-        # Estimate the mask from the nifti file 
+        # Estimate the mask from the nifti file
         if self.flat_mask is None:
             self.volume_grid = final_img.shape
             self.voxel_size = np.abs(np.diag(final_img.affine)[:3])
@@ -283,7 +284,7 @@ class MITTENS(Spatial):
 
     def get_prob_funcs(self, order="singleODF"):
 
-        requested_module = "%s_%s_ss%.2f_am%d" % (order, self.odf_resolution, 
+        requested_module = "%s_%s_ss%.2f_am%d" % (order, self.odf_resolution,
                 self.step_size, self.angle_max)
         requested_module = re.sub( "\.", "_", requested_module)
         module = importlib.import_module("mittens.fortran." + requested_module)
@@ -337,7 +338,7 @@ class MITTENS(Spatial):
             self.save_nifti(self.flat_mask.astype(np.float), output_prefix + "_mask.nii.gz", is_full_image=True)
 
     def estimate_singleODF(self, output_prefix=""):
-        
+
         # Output matrix
         outputs = np.zeros((self.nvoxels,len(neighbor_names)),dtype=np.float)
 
@@ -369,7 +370,7 @@ class MITTENS(Spatial):
             self.save_nifti(self.singleODF_codi, output_prefix + "_singleODF_CoDI.nii.gz")
 
     def estimate_doubleODF(self, output_prefix=""):
-        
+
         logger.info("Pre-computing neighbor angle weights")
         Ypc = compute_weights_as_neighbor_voxels(
                 self.odf_values, (self.prob_angles_weighted > 0).astype(np.float))
@@ -408,7 +409,7 @@ class MITTENS(Spatial):
 
         # Calculate the distances
         logger.info("Calculating Double ODF CoDI")
-        self.doubleODF_codi = aitchison_distance(self.doubleODF_null_probs, 
+        self.doubleODF_codi = aitchison_distance(self.doubleODF_null_probs,
                 self.doubleODF_results)
 
         # Divide the Columns into two matrices, calculate asymmetry
@@ -419,15 +420,15 @@ class MITTENS(Spatial):
             half2.append(self.doubleODF_results[:,neighbor_names.index(nbrY)])
         half1 = np.column_stack(half1)
         half2 = np.column_stack(half2)
-        
+
         logger.info("Calculating CoAsy")
         self.doubleODF_coasy = aitchison_asymmetry(half1, half2)
 
     def _voxel_graph(self):
         # Creates an appropriate VoxelGraph
-        return VoxelGraph( 
+        return VoxelGraph(
                 # Transition Prob details
-                angle_max = self.angle_max, odf_resolution=self.odf_resolution, 
+                angle_max = self.angle_max, odf_resolution=self.odf_resolution,
                 angle_weights=self.angle_weights, step_size=self.step_size,
                 angle_weighting_power=self.angle_weighting_power,
                 normalize_doubleODF=self.normalize_doubleODF,
@@ -439,85 +440,85 @@ class MITTENS(Spatial):
                 voxel_coords=self.voxel_coords, coordinate_lut=self.coordinate_lut
                 )
 
-    def build_graph(self, doubleODF=True, weighting_scheme="minus_iso", 
+    def build_graph(self, doubleODF=True, weighting_scheme="minus_iso",
                                                  require_all_neighbors=False):
         """
         Builds a ``networkit.graph.Graph`` from transition probabilities.
-        
+
         Parameters:
         ===========
-        
+
         doubleODF:bool
           If True, the transition probabilities from the doubleODF method will be used.
           If ``normalize_doubleODF`` was set to True when you constructed the object,
           the outgoing edges from every node will sum to 1. Default: `True`
-          
+
         weighting_scheme:str
           One of {"negative_log_p", "minus_iso", "minus_iso_scaled", "minus_iso_negative_log",
           "minus_iso_scaled_negative_log", "transition probability"}. Determines how transition
           probabilities are used as edge weights. Default: ""
-          
+
         require_all_neighbors:bool
           if a voxel does not have all 26 neighbors, remove all outgoing edges and replace them
           with a probability 1 self-edge
-          
+
         Weighting Schemes:
         ===================
-        
+
         Your weighting scheme choice needs to be compatible with how you want to use the graph.
-        
-        If you plan on calculating shortest paths, you want the edge weights to be **lower** 
+
+        If you plan on calculating shortest paths, you want the edge weights to be **lower**
         when the transition probability is higher. This can be accomplished by taking the negative
         log of a probability.
-        
+
         If you are simulating 3D walks, you want the edge weights to be high when the transition
         probability is high.
-        
+
         Schemes for walks:
         ------------------
-        ``"minus_iso"``: 
+        ``"minus_iso"``:
           The isotropic probabilities are subtracted from the transition probabilities. No edge is added
-          when transition probabilities are lower than the corresponding isotropic probability. This is 
+          when transition probabilities are lower than the corresponding isotropic probability. This is
           not ideal for simulating walks because each nodes outgoing edges do not sum to 1.
-                         
-        ``"minus_iso_scaled"``: 
-          Same as ``"minus_iso"`` except probabilities are re-scaled so they sum to 1. This is a very 
+
+        ``"minus_iso_scaled"``:
+          Same as ``"minus_iso"`` except probabilities are re-scaled so they sum to 1. This is a very
           good idea for simulating walks.
-                                
-        ``"transition probability"``: 
-          The transition probabilities are directly used as edge weights. These are the closest to 
+
+        ``"transition probability"``:
+          The transition probabilities are directly used as edge weights. These are the closest to
           the input data, but if you use diffusion ODFs as input will likely not produce very specific
           paths.
-        
-        
+
+
         Schemes for shortest paths:
         ---------------------------
-        
+
         ``"negative_log_p"``:
           Transition probabilities are log transformed and made negative.  This is similar to the
           Zalesky 2009 strategy.
-          
+
         ``"minus_iso_negative_log"``:
           Isotropic probabilities are subtracted from transition probabilities. Edges are not added when
           transition probabilities are less than the isotropic probability.
-          
+
         ``"minus_iso_scaled_negative_log"``:
           Same as ``"minus_iso_negative_log"`` except probabilities are re-scaled to sum to 1 *before*
-          the log transform is applied. 
-          
+          the log transform is applied.
+
         """
 
         G = networkit.graph.Graph(int(self.nvoxels), weighted=True, directed=True)
 
-        # Place the requested probabilities into `prob_mat` 
+        # Place the requested probabilities into `prob_mat`
         if doubleODF:
             prob_mat = self.doubleODF_results
             null_p = self.doubleODF_null_probs
         else:
             prob_mat = self.singleODF_results
             null_p = self.singleODF_null_probs
-            
-        
+
+
         if require_all_neighbors:
             logger.info("Removing Voxels without all 26 neighbors connected")
             # Which probabilities point to a voxel not in the mask?
@@ -539,29 +540,29 @@ class MITTENS(Spatial):
             for incomplete_node in np.flatnonzero(incomplete_neighbor_nodes):
                 # Add a self-edge
                 G.addEdge(incomplete_node, incomplete_node, w = incomplete_weight)
-            
+
         ## Determine how to weight edges. Changes `prob_mat`, which contains probabilities,
         ## to `prob_weights`, which contains edge weights.
-        
+
         # Take the negative log of the transition probabilities
         if weighting_scheme == "negative_log_p":
             prob_weights = -np.log(prob_mat)
             # Change nans and infs to 0
             prob_weights[np.logical_not(np.isfinite(prob_weights))] = 0
-            
+
         # Subtract the isotropic transition probs from the calculated transition probs
         elif weighting_scheme.startswith("minus_iso"):
             prob_weights = prob_mat - null_p
             low = prob_weights <= 0
             prob_weights[low] = 0
-            
+
             if "scaled" in weighting_scheme:
                 prob_weights = prob_weights / np.nansum(prob_weights, 1)[:,np.newaxis]
-            
+
             if weighting_scheme.endswith("negative_log"):
                 prob_weights = -np.log(prob_weights)
                 prob_weights[np.logical_not(np.isfinite(prob_weights))] = DISCONNECTED
-        
+
         # Use the transition probabilities as-is
         elif weighting_scheme == "transition probability":
             prob_weights = prob_mat.copy()
@@ -586,43 +587,43 @@ class MITTENS(Spatial):
                     else:
                         G.addEdge(j, to_node, w = DISCONNECTED)
 
-        vg = self._voxel_graph()    
+        vg = self._voxel_graph()
         vg.weighting_scheme = weighting_scheme
         vg.graph = G
         return vg
 
-    def build_null_graph(self, doubleODF=True, purpose="walks", 
+    def build_null_graph(self, doubleODF=True, purpose="walks",
                                             require_all_neighbors=False):
         """
         Builds a ``networkit.graph.Graph`` from null transition probabilities.
-        
+
         Parameters:
         ===========
-        
+
         doubleODF:bool
           If True, the transition probabilities from the doubleODF method will be used.
           If ``normalize_doubleODF`` was set to True when you constructed the object,
           the outgoing edges from every node will sum to 1. Default: `True`
-          
+
         purpose:str
           One of {"walks", "shortest paths"}. Determines how transition
           probabilities are used as edge weights. Default: "walks"
-          
+
         require_all_neighbors:bool
           if a voxel does not have all 26 neighbors, remove all outgoing edges and replace them
           with a probability 1 self-edge
-          
+
         """
 
         G = networkit.graph.Graph(int(self.nvoxels), weighted=True, directed=True)
 
-        # Place the requested probabilities into `prob_mat` 
+        # Place the requested probabilities into `prob_mat`
         if doubleODF:
             null_p = self.doubleODF_null_probs
         else:
             null_p = self.singleODF_null_probs
-            
-        
+
+
         if require_all_neighbors:
             logger.info("Removing Voxels without all 26 neighbors connected")
             # Which probabilities point to a voxel not in the mask?
@@ -640,7 +641,7 @@ class MITTENS(Spatial):
             for incomplete_node in np.flatnonzero(incomplete_neighbor_nodes):
                 # Add a self-edge
                 G.addEdge(incomplete_node, incomplete_node, w = incomplete_weight)
-            
+
         if purpose == "shortest paths":
             prob_weights = -np.log(null_p)
         elif purpose == "walks":
@@ -657,9 +658,8 @@ class MITTENS(Spatial):
                     continue
                 # Actually adds the edge to the graph
                 G.addEdge(j, to_node, w = prob_weights[i])
-                    
-        vg = self._voxel_graph()    
+
+        vg = self._voxel_graph()
         vg.weighting_scheme = purpose
         vg.graph = G
         return vg
-

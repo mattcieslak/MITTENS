@@ -632,10 +632,9 @@ class VoxelGraph(Spatial):
 
         # Run the modified Dijkstra algorithm from networkit
         if use_bottleneck:
-            n = networkit.graph.BottleneckSP(self.graph, source_label_node)
-            score_func = self.get_bottleneck_scores_for_path
+            raise NotImplementedError()
         else:
-            n = networkit.graph.Dijkstra(self.graph, source_label_node)
+            n = networkit.distance.Dijkstra(self.graph, source_label_node)
             score_func = self.get_scores_for_path
         t0 = time()
         n.run()
@@ -754,7 +753,6 @@ class VoxelGraph(Spatial):
         After adding an atlas using VoxelGraph.add_atlas() this function
         calculates inter-regional connectivity.
         """
-        #from atlas_graph import AtlasGraph
         if self.atlas_labels is None or not len(self.atlas_labels) == self.nvoxels:
             raise ValueError("No atlas labels are available")
 
@@ -764,8 +762,8 @@ class VoxelGraph(Spatial):
             full_region_ids.sort()
             labels_to_calculate = np.intersect1d(available_labels, full_region_ids)
             if not len(labels_to_calculate) == len(full_region_ids):
-                logger.warning("full_region_ids does not match available labels," \
-                            "this can result in a disconnected node")
+                logger.warning("full_region_ids does not match available labels,"
+                               "this can result in a disconnected node")
         else:
             full_region_ids = available_labels
             labels_to_calculate = available_labels
@@ -785,7 +783,8 @@ class VoxelGraph(Spatial):
         # Calculate spaci maps for each region
         outgoing_spaci = {}
         for node_id, region_label in enumerate(full_region_ids):
-            if not region_label in available_labels: continue
+            if region_label not in available_labels:
+                continue
             raw_scores, scores, path_lengths = self.shortest_path_map(
                 source_region=region_label, back_propagate_scores=False)
             outgoing_spaci[region_label] = {
