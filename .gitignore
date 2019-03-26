@@ -7,7 +7,8 @@
 *.mif.gz
 *.txt
 *.tck
-
+*.mat
+*.plist
 # vim
 *.swp
 
