@@ -13,6 +13,7 @@ import os.path as op
 import numpy as np
 import logging
 import re
+import nibabel as nib
 logger = logging.getLogger(__name__)
 
 def fast_load_fibgz(fib_file):
