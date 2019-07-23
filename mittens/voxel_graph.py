@@ -432,7 +432,7 @@ class VoxelGraph(Spatial):
 
     # Shortest paths
     def Dijkstra(self, g, source, sink):
-        d = networkit.graph.Dijkstra(g, source, target=sink)
+        d = networkit.distance.Dijkstra(g, source, target=sink)
         d.run()
         path = d.getPath(sink)
         return path
@@ -553,7 +553,7 @@ class VoxelGraph(Spatial):
         target_component = components.componentOfNode(source_label_node)
 
         # Run the modified Dijkstra algorithm from networkit
-        n = networkit.graph.Dijkstra(self.graph, source_label_node)
+        n = networkit.distance.Dijkstra(self.graph, source_label_node)
         n.run()
         #logger.info("Computed shortest paths")
 
