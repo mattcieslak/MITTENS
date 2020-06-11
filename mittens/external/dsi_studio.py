@@ -65,6 +65,7 @@ def load_fixels_from_fib(fib_file, fixel_threshold=0):
 
     # Check that this fib file matches what we expect
     flat_mask = f["fa0"].squeeze() > fixel_threshold
+    flat_mask = flat_mask.flatten(order='F')
     index_variables = sorted([var for var in f.keys() if var.startswith("index")])
     weight_variables = sorted([var for var in f.keys() if var.startswith("fa")])
     index_matrix = np.column_stack([f[k].squeeze()[flat_mask] for k in index_variables])
@@ -111,6 +112,7 @@ def load_fib(fib_file, expected_vertices=None,
 
     valid_odfs = []
     flat_mask = f["fa0"].squeeze() > 0
+    flat_mask = flat_mask.flatten(order='F')
     for n in range(len(odf_vars)):
         varname = "odf%d" % n
         odfs = f[varname]
