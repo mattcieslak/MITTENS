@@ -16,7 +16,7 @@ class Spatial(object):
         else:
             self.real_affine = np.array([])
 
-    def save_nifti(self, data, fname, real_affine=False, is_full_image=False):
+    def save_nifti(self, data, fname, real_affine=True, is_full_image=False):
         """
         Writes a value for each node into a 3D volume.
 
