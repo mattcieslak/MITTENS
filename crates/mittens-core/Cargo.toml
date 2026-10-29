@@ -1,0 +1,12 @@
+[package]
+name = "mittens-core"
+description = "Analytic voxel-to-voxel transition probabilities from (asymmetric) ODFs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+rand = { version = "0.9", default-features = false, features = ["std", "small_rng"] }
+rayon = "1.11"

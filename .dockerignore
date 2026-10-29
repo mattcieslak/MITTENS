@@ -1,0 +1,6 @@
+target/
+.git/
+**/__pycache__/
+**/*.so
+*.pdf
+doc/

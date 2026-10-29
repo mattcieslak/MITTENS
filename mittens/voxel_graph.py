@@ -1,975 +1,382 @@
-#!/usr/bin/env python
-import networkx as nx
-import numpy as np
+"""Voxel-graph tractography (Cieslak et al. 2018) on igraph.
+
+Nodes are the voxels of a :class:`~mittens.model.TransitionResult`, in the
+same order. Edge ``u -> v`` joins a voxel to one of its 26 neighbors and
+carries a probability ``p`` and a length ``-log p``, so a shortest path is
+the most probable sequence of voxel-to-voxel moves.
+"""
+from __future__ import annotations
+
 import os
-from scipy.io.matlab import loadmat, savemat
-import logging
-from tqdm import tqdm
+from dataclasses import dataclass, field
+from functools import cached_property
+
+import igraph as ig
 import nibabel as nib
-import os.path as op
-import networkit
-from time import time
-from .spatial import Spatial, hdr
-try:
-    from matplotlib import pyplot as plt
-    has_matplotlib = True
-except ImportError:
-    has_matplotlib = False
-from mittens.utils import unit_vector
+import numpy as np
 
-DISCONNECTED = 999999999
-logger = logging.getLogger(__name__)
+WEIGHTS = ("transition probability", "minus_iso", "minus_iso_scaled")
 
 
-class VoxelGraph(Spatial):
-    def __init__(
-            self,
-            matfile="",
-            # Probability calculation data
-            step_size=None,
-            angle_max=None,
-            odf_resolution=None,
-            weighting_scheme=None,
-            angle_weights=None,
-            angle_weighting_power=None,
-            normalize_doubleODF=None,
-            # Spatial mapping data
-            flat_mask=None,
-            nvoxels=None,
-            real_affine=None,
-            ras_affine=None,
-            voxel_size=None,
-            volume_grid=None,
-            voxel_coords=None,
-            coordinate_lut=None,
-            graph=None):
+def edge_probabilities(result, model: str = "double", weights: str = "transition probability"):
+    """``(source, target, p, null)`` for every voxel-to-neighbor edge with
+    ``p > 0``; ``null`` is the isotropic-ODF probability of each of the 26
+    neighbor directions.
+
+    weights
+        ``"transition probability"``: ``P(u -> v)``.
+        ``"minus_iso"``: ``P(u -> v)`` minus the probability for an isotropic
+        ODF. Edges at or below it are dropped.
+        ``"minus_iso_scaled"``: ``"minus_iso"`` rescaled so that each voxel's
+        edges sum to 1.
+    """
+    if model not in ("single", "double"):
+        raise ValueError("model must be 'single' or 'double'")
+    if weights not in WEIGHTS:
+        raise ValueError(f"weights must be one of {WEIGHTS}")
+    if model == "double":
+        probs, null = result.double_normalized, result.null_double / result.null_double.sum()
+    else:
+        probs, null = result.single, result.null_single
+    p = np.nan_to_num(probs, nan=0.0)
+    if weights != "transition probability":
+        p = np.clip(p - null, 0, None)
+        if weights == "minus_iso_scaled":
+            s = p.sum(axis=1, keepdims=True)
+            p = np.divide(p, s, out=np.zeros_like(p), where=s > 0)
+    nt = result.neighbor_table
+    u, k = np.nonzero((nt >= 0) & (p > 0))
+    return u, nt[u, k].astype(np.int64), p[u, k], np.asarray(null, dtype=np.float64)
+
+
+def _neighbor_index(offsets: np.ndarray) -> np.ndarray:
+    """Position of each index-space offset in ``neighbor_offsets()``."""
+    code = (offsets[:, 0] + 1) * 9 + (offsets[:, 1] + 1) * 3 + (offsets[:, 2] + 1)
+    return code - (code > 13)
+
+
+@dataclass
+class ShortestPaths:
+    """Most probable paths between a region and every voxel.
+
+    probability : product of the edge probabilities along each voxel's path
+        (1 inside the region, 0 where there is no path).
+    null_probability : the same product for an isotropic ODF everywhere.
+    hops : number of moves on the path (0 inside the region, -1 where there
+        is no path).
+    parent : the next voxel toward the region (-1 inside the region or where
+        there is no path).
+    toward : True when paths run from each voxel to the region, False when
+        they run from the region to each voxel.
+    """
+
+    probability: np.ndarray
+    null_probability: np.ndarray
+    hops: np.ndarray
+    parent: np.ndarray
+    toward: bool
+    levels: list[np.ndarray] = field(repr=False)
+
+    @property
+    def reached(self) -> np.ndarray:
+        return self.hops >= 0
+
+    @property
+    def mean_probability(self) -> np.ndarray:
+        """Geometric mean of the edge probabilities along each path (1 inside
+        the region)."""
+        out = np.where(self.hops == 0, 1.0, 0.0)
+        m = self.hops > 0
+        out[m] = self.probability[m] ** (1.0 / self.hops[m])
+        return out
+
+    def path(self, node: int) -> np.ndarray:
+        """Voxels on the path of ``node``, in the direction of travel."""
+        if self.hops[node] < 0:
+            return np.empty(0, dtype=np.int64)
+        out = [int(node)]
+        while self.parent[out[-1]] >= 0:
+            out.append(int(self.parent[out[-1]]))
+        return np.array(out if self.toward else out[::-1])
+
+    def paths(self, nodes) -> list[np.ndarray]:
+        """Paths of every reached voxel in ``nodes``."""
+        return [self.path(v) for v in np.asarray(nodes).ravel() if self.hops[v] >= 0]
+
+    def backprop(self, values) -> np.ndarray:
+        """For each voxel, the largest of ``values`` over every voxel whose
+        path passes through it, itself included."""
+        out = np.where(self.reached, np.asarray(values, dtype=np.float64), 0.0)
+        for nodes in self.levels[:0:-1]:
+            np.maximum.at(out, self.parent[nodes], out[nodes])
+        return out
+
+
+class VoxelGraph:
+    """Directed graph from voxels to their 26 neighbors.
+
+    Edge ``i`` runs from ``source[i]`` to ``target[i]`` with probability
+    ``p[i]``. ``graph`` is the same graph as an ``igraph.Graph`` (edge order
+    preserved, no attributes); pass ``weights=vg.length`` or
+    ``capacity=vg.p.tolist()`` to igraph algorithms.
+    """
+
+    def __init__(self, source, target, p, ijk, dims, affine, null, weights: str = "transition probability"):
+        self.source = np.asarray(source, dtype=np.int64)
+        self.target = np.asarray(target, dtype=np.int64)
+        self.p = np.asarray(p, dtype=np.float64)
+        self.ijk = np.asarray(ijk, dtype=np.int64)
+        self.dims = tuple(int(d) for d in dims)
+        self.affine = np.asarray(affine, dtype=np.float64)
+        self.null = np.asarray(null, dtype=np.float64)
+        self.weights = weights
+        self.atlas: np.ndarray | None = None
+        n = len(self.ijk)
+        if not (len(self.source) == len(self.target) == len(self.p)):
+            raise ValueError("source, target and p must have the same length")
+        if len(self.source) and (max(self.source.max(), self.target.max()) >= n or min(self.source.min(), self.target.min()) < 0):
+            raise ValueError("edge endpoints must be voxel indices")
+
+    @classmethod
+    def from_transitions(cls, result, model: str = "double", weights: str = "transition probability") -> "VoxelGraph":
+        """Graph whose edge probabilities come from ``result`` (see
+        :func:`edge_probabilities`)."""
+        u, v, p, null = edge_probabilities(result, model, weights)
+        return cls(u, v, p, result.ijk, result.dims, result.affine, null, weights)
+
+    def __repr__(self) -> str:
+        return f"VoxelGraph({self.n_voxels} voxels, {len(self.p)} edges, weights={self.weights!r})"
+
+    @property
+    def n_voxels(self) -> int:
+        return len(self.ijk)
+
+    @property
+    def length(self) -> np.ndarray:
+        return -np.log(self.p)
+
+    @cached_property
+    def graph(self) -> ig.Graph:
+        return ig.Graph(n=self.n_voxels, edges=np.column_stack([self.source, self.target]), directed=True)
+
+    # -- regions ----------------------------------------------------------
+
+    def voxel_values(self, image) -> np.ndarray:
+        """The value of ``image`` at every voxel. ``image`` is a NIfTI path or
+        image on the ODF grid, an array of shape ``dims``, or one value per
+        voxel."""
+        if isinstance(image, (str, os.PathLike)):
+            image = nib.load(image)
+        if isinstance(image, nib.spatialimages.SpatialImage):
+            if image.shape[:3] != self.dims or not np.allclose(image.affine, self.affine, atol=1e-4):
+                raise ValueError("image is not on the ODF grid")
+            image = np.asanyarray(image.dataobj)
+        arr = np.asarray(image)
+        if arr.shape[:1] == (self.n_voxels,) and arr.ndim == 1:
+            return arr
+        if arr.shape[:3] != self.dims:
+            raise ValueError(f"expected shape {self.dims} or ({self.n_voxels},), got {arr.shape}")
+        return arr[tuple(self.ijk.T)]
+
+    def add_atlas(self, atlas) -> None:
+        """Label every voxel from an integer atlas image, so regions can be
+        given as labels."""
+        self.atlas = np.rint(self.voxel_values(atlas)).astype(np.int64)
+
+    def region_nodes(self, region) -> np.ndarray:
+        """Voxels in ``region``: an atlas label, or a mask accepted by
+        :meth:`voxel_values` (nonzero voxels)."""
+        if isinstance(region, (int, np.integer)):
+            if self.atlas is None:
+                raise ValueError("integer regions need add_atlas() first")
+            nodes = np.flatnonzero(self.atlas == region)
+        else:
+            nodes = np.flatnonzero(self.voxel_values(region))
+        if len(nodes) == 0:
+            raise ValueError("region contains no voxels of the graph")
+        return nodes
+
+    def mask(self, mask) -> "VoxelGraph":
+        """The subgraph of voxels that are nonzero in ``mask``."""
+        keep = self.voxel_values(mask).astype(bool)
+        new_index = np.cumsum(keep) - 1
+        e = keep[self.source] & keep[self.target]
+        out = VoxelGraph(new_index[self.source[e]], new_index[self.target[e]], self.p[e], self.ijk[keep],
+                         self.dims, self.affine, self.null, self.weights)
+        if self.atlas is not None:
+            out.atlas = self.atlas[keep]
+        return out
+
+    # -- shortest paths ---------------------------------------------------
+
+    def shortest_paths_from(self, region) -> ShortestPaths:
+        """The most probable path from ``region`` to every voxel."""
+        return self._shortest_paths(self.region_nodes(region), toward=False)
+
+    def shortest_paths_to(self, region) -> ShortestPaths:
+        """The most probable path from every voxel to ``region``."""
+        return self._shortest_paths(self.region_nodes(region), toward=True)
+
+    def _shortest_paths(self, nodes: np.ndarray, toward: bool) -> ShortestPaths:
+        # Dijkstra from a virtual node joined to the region by zero-length edges.
+        n = self.n_voxels
+        root = np.full(len(nodes), n)
+        a = np.concatenate([self.source, nodes if toward else root])
+        b = np.concatenate([self.target, root if toward else nodes])
+        length = np.concatenate([self.length, np.zeros(len(nodes))])
+        mode = "in" if toward else "out"
+        g = self.graph.copy()
+        g.add_vertices(1)
+        g.add_edges(np.column_stack([a[len(self.p):], b[len(self.p):]]))
+        dist = np.asarray(g.distances(source=n, weights=length, mode=mode)[0])
+
+        # Keep the edges that lie on a shortest path; a breadth-first search
+        # over them picks, for every voxel, the fewest-move shortest path.
+        start, end = (b, a) if toward else (a, b)
+        via = dist[start] + length
+        tight = np.isfinite(via) & (np.abs(via - dist[end]) <= 1e-12 * np.maximum(1.0, dist[end]))
+        tree = ig.Graph(n=n + 1, edges=np.column_stack([a[tight], b[tight]]), directed=True)
+        vids, layers, parents = tree.bfs(n, mode=mode)
+        vids, parent = np.asarray(vids), np.asarray(parents[:n])
+        parent[(parent < 0) | (parent == n)] = -1
+        levels = [vids[layers[i]:layers[i + 1]] for i in range(1, len(layers) - 1)]
+        hops = np.full(n, -1)
+        for h, level in enumerate(levels):
+            hops[level] = h
+
+        # Null probability of each voxel's move to or from its parent.
+        moved = np.flatnonzero(parent >= 0)
+        offsets = self.ijk[parent[moved]] - self.ijk[moved]
+        with np.errstate(divide="ignore"):
+            log_null = np.log(self.null)
+        step = np.zeros(n)
+        step[moved] = log_null[_neighbor_index(offsets if toward else -offsets)]
+        acc = np.zeros(n)
+        for level in levels[1:]:
+            acc[level] = acc[parent[level]] + step[level]
+        reached = hops >= 0
+        return ShortestPaths(
+            probability=np.where(reached, np.exp(-dist[:n]), 0.0),
+            null_probability=np.where(reached, np.exp(acc), 0.0),
+            hops=hops, parent=parent, toward=toward, levels=levels,
+        )
+
+    def atlas_connectivity(self, labels=None) -> dict[str, np.ndarray]:
+        """Region-to-region scores from the most probable paths.
+
+        Entry ``[i, j]`` describes the best path from region ``labels[i]`` to
+        any voxel of region ``labels[j]``: ``probability`` and
+        ``mean_probability`` take the largest value over those voxels and
+        ``hops`` the fewest moves (-1 if none is reached).
         """
-        Represents a voxel graph.
+        if self.atlas is None:
+            raise ValueError("call add_atlas() first")
+        labels = np.unique(self.atlas[self.atlas > 0]) if labels is None else np.asarray(labels)
+        members = [np.flatnonzero(self.atlas == label) for label in labels]
+        r = len(labels)
+        prob, mean, hops = np.zeros((r, r)), np.zeros((r, r)), np.full((r, r), -1)
+        for i, nodes in enumerate(members):
+            if len(nodes) == 0:
+                continue
+            sp = self._shortest_paths(nodes, toward=False)
+            mp = sp.mean_probability
+            for j, target in enumerate(members):
+                h = sp.hops[target]
+                if (h >= 0).any():
+                    prob[i, j] = sp.probability[target].max()
+                    mean[i, j] = mp[target].max()
+                    hops[i, j] = h[h >= 0].min()
+        return {"labels": labels, "probability": prob, "mean_probability": mean, "hops": hops}
 
-        Parameters:
-        ===========
-        matfile:str
-          Path to a MATLAB .mat file created by constructing a voxel graph.
-        step_size:float
-          Step size in voxel units. Used for calculating transition probabilities
-        angle_max:float
-          Maximum turning angle in degrees. Used for calculating transition
-          probabilities.
-        odf_resolution:str
-          ODF tesselation used in DSI Studio. Options are {"odf4", "odf6", "odf8"}.
-        angle_weights:str
-          Angle weighting scheme used while calculating transition probabilities
-        angle_weighting_power:float
-          Parameter used when an exponential weighting scheme is selected
-        normalize_doubleODF:bool
-          Should the transition probabilities from doubleODF be forced to sum to 1?
+    # -- graph measures ---------------------------------------------------
 
-        real_affine:np.ndarray
-        flat_mask:np.ndarray
-        ras_affine:np.ndarray
-        voxel_size:np.ndarray
-        volume_grid:np.ndarray
-        nvoxels:int
+    def components(self) -> np.ndarray:
+        """Weakly connected component of each voxel."""
+        return np.asarray(self.graph.connected_components(mode="weak").membership)
 
-        voxel_coords:np.ndarray
-        coordinate_lut:dict
+    def betweenness(self, n_samples: int | None = None, seed: int = 0) -> np.ndarray:
+        """Shortest-path betweenness of each voxel, with edge lengths
+        ``-log p``. Exact when ``n_samples`` is None (all pairs; slow for a
+        whole brain); otherwise estimated from that many random source voxels,
+        following one shortest path per pair."""
+        if n_samples is None:
+            return np.asarray(self.graph.betweenness(directed=True, weights=self.length))
+        rng = np.random.default_rng(seed)
+        sources = rng.choice(self.n_voxels, size=min(n_samples, self.n_voxels), replace=False)
+        total = np.zeros(self.n_voxels)
+        for s in sources:
+            sp = self._shortest_paths(np.array([s]), toward=False)
+            # Paths from s run through every ancestor of their endpoint.
+            below = sp.reached.astype(np.float64)
+            for nodes in sp.levels[:0:-1]:
+                np.add.at(below, sp.parent[nodes], below[nodes])
+            dependency = np.where(sp.reached, below - 1.0, 0.0)
+            dependency[s] = 0.0
+            total += dependency
+        return total * self.n_voxels / len(sources)
 
+    def max_flow(self, source_region, sink_region) -> dict:
+        """Maximum flow from one region to another with each edge's
+        probability as its capacity; each region voxel sends or receives at
+        most 1.
+
+        Returns ``value``, the flow into (``inflow``) and out of
+        (``outflow``) every voxel, and ``sink_side``: the voxels on the sink
+        side of the minimum cut.
         """
-        self.step_size = step_size
-        self.angle_max = angle_max
-        self.odf_resolution = odf_resolution
-        self.weighting_scheme = weighting_scheme
-        self.angle_weights = angle_weights
-        self.normalize_doubleODF = normalize_doubleODF
-        self.angle_weighting_power = angle_weighting_power
-
-        self.flat_mask = flat_mask
-        self.nvoxels = nvoxels
-        self.voxel_size = voxel_size
-        self.real_affine = real_affine
-        self.ras_affine = ras_affine
-        self.volume_grid = volume_grid
-
-        self.voxel_coords = voxel_coords
-        self.coordinate_lut = coordinate_lut
-        self.graph = graph
-
-        # These are computed later
-        self.atlas_labels = None
-        self.label_lut = None
-        self.background_image = None
-        self.null_graph = None
-
-        # Nodes that do not correspond to a voxel (eg source or sink)
-        self.nonvoxel_nodes = set()
-        self.undirected_component_ids = None
-
-        if matfile:
-            logger.info("Loading voxel graph from matfile")
-            self._load_matfile(matfile)
-
-    # IO
-    def _load_matfile(self, matfile):
-        if not os.path.exists(matfile):
-            logger.critical("No such file: %s", matfile)
-            return
-
-        #try:
-        m = loadmat(matfile)
-        #except Exception, e:
-        #    logger.critical("Unable to load %s:\n %s", matfile, e)
-        #    return
-
-        # Transition prob details
-        self.step_size = float(m['step_size'].squeeze())
-        self.angle_max = float(m['angle_max'].squeeze())
-        self.odf_resolution = str(m['odf_resolution'].squeeze())
-        self.weighting_scheme = str(m['weighting_scheme'].squeeze())
-        self.angle_weights = str(m['angle_weights'].squeeze())
-        self.normalize_doubleODF = bool(m['normalize_doubleODF'].squeeze())
-        self.angle_weighting_power = float(m['angle_weighting_power'].squeeze())
-
-        # Spatial mappings
-        self.flat_mask = m['flat_mask'].squeeze().astype(np.bool)
-        masked_voxels = self.flat_mask.sum()
-        assert masked_voxels == m['nvoxels']
-        self.ras_affine = m['ras_affine']
-        self.real_affine = m.get('real_affine', self.ras_affine).squeeze()
-        self.voxel_size = m['voxel_size'].squeeze()
-        self.volume_grid = m['volume_grid'].squeeze().astype(np.int)
-
-        # Guaranteed to have a flat mask by now
-        self.nvoxels = masked_voxels
-        # These coordinates are LPS+ voxels
-        self.voxel_coords = np.array(
-            np.unravel_index(np.flatnonzero(self.flat_mask), self.volume_grid,
-                             order="F")).T
-        self.coordinate_lut = dict(
-            [(tuple(coord), n) for n, coord in enumerate(self.voxel_coords)])
-
-        logger.info("Loading graph from matfile")
-        sparse_graph = nx.from_scipy_sparse_matrix(
-            m['graph'], create_using=nx.DiGraph(), edge_attribute="w")
-        self.graph = networkit.nxadapter.nx2nk(sparse_graph, weightAttr="w")
-
-    def mask(self, mask_image):
-        """
-        remove voxels that aren't 0 in ``mask_image``.
-        Voxels that aren't already in the voxel graph but are
-        nonzero in the mask image will not be added.
-        """
-        external_flat_mask = self._oriented_nifti_data(mask_image) > 0
-        if np.all(external_flat_mask):
-            logger.info("Mask does not remove any voxels")
-            return
-
-        masked_num = external_flat_mask.sum()
-        logger.info("Reducing number of nodes from %d to %d", self.nvoxels, masked_num)
-        self.graph = self.get_subgraph(external_flat_mask)
-        # Update the coordinate tables
-        self.flat_mask[self.flat_mask] = external_flat_mask
-        self.nvoxels = masked_num
-        self.voxel_coords = np.array(
-            np.unravel_index(np.flatnonzero(self.flat_mask), self.volume_grid,
-                             order="F")).T
-        self.coordinate_lut = dict(
-            [(tuple(coord), n) for n, coord in enumerate(self.voxel_coords)])
-
-    def get_subgraph(self, mask_array):
-        masked_num = mask_array.sum()
-        new_graph = networkit.Graph(n=masked_num, directed=True, weighted=True)
-        # Map old (full) node ids to new (subgraph) node ids
-        full_to_sub = {}
-        for sub, full in enumerate(np.flatnonzero(mask_array)):
-            full_to_sub[full] = sub
-
-        # Insert edges
-        def insert_new_edges(from_node, to_node, edgeweight, edgeid):
-            new_from_node = full_to_sub.get(from_node, -99)
-            new_to_node = full_to_sub.get(to_node, -99)
-            if -99 in (new_from_node, new_to_node):
-                return
-            new_graph.addEdge(new_from_node, new_to_node, edgeweight)
-
-        for node in full_to_sub.keys():
-            self.graph.forEdgesOf(node, insert_new_edges)
-
-        return new_graph
-
-    def add_background_image(self, image_file):
-        self.background_image = self._oriented_nifti_data(image_file)
-
-    def save(self, matfile):
-        if self.graph is None:
-            raise ValueError("No graph to save")
-        if self.graph.numberOfNodes() > self.nvoxels:
-            logger.warn("Non-voxel nodes are present in your graph.")
-
-        logger.info("Converting networkit Graph to csr matrix")
-        m = {
-            "flat_mask": self.flat_mask,
-            "nvoxels": self.nvoxels,
-            "voxel_size": self.voxel_size,
-            "volume_grid": self.volume_grid,
-            "weighting_scheme": self.weighting_scheme,
-            "step_size": self.step_size,
-            "odf_resolution": self.odf_resolution,
-            "angle_max": self.angle_max,
-            "angle_weights": self.angle_weights,
-            "normalize_doubleODF": self.normalize_doubleODF,
-            "angle_weighting_power": self.angle_weighting_power,
-            "graph": networkit.algebraic.adjacencyMatrix(self.graph, matrixType="sparse"),
-            "ras_affine": self.ras_affine,
-            "real_affine": self.real_affine
+        src, dst = self.region_nodes(source_region), self.region_nodes(sink_region)
+        n = self.n_voxels
+        g = self.graph.copy()
+        g.add_vertices(2)
+        g.add_edges(np.vstack([np.column_stack([np.full(len(src), n), src]),
+                               np.column_stack([dst, np.full(len(dst), n + 1)])]))
+        capacity = np.concatenate([self.p, np.ones(len(src) + len(dst))])
+        f = g.maxflow(n, n + 1, capacity=capacity.tolist())
+        flow = np.asarray(f.flow)[: len(self.p)]
+        return {
+            "value": float(f.value),
+            "inflow": np.bincount(self.target, flow, minlength=n),
+            "outflow": np.bincount(self.source, flow, minlength=n),
+            "sink_side": np.asarray(f.membership[:n]) == 1,
         }
 
-        savemat(matfile, m, do_compression=True)
-        logger.info("Saved matfile to %s", matfile)
-
-    def use_affine_from(self, affine_image):
-        self._set_real_affine(affine_image)
-
-    # Region of Interest functions
-    def add_atlas(self, atlas_nifti, min_voxels=1, connect_to_voxels=False):
-        """ Inserts bidirectional connections between a spaceless "region node"
-        and all the voxels it inhabits. Also stores ROI information for querying.
-        """
-        #if self.label_lut is not None:
-        #   raise NotImplementedError("Cannot add multiple atlases yet")
-        self.atlas_labels = self._oriented_nifti_data(atlas_nifti)
-        self.label_lut = {}
-
-        if connect_to_voxels:
-            for region in self.label_lut.keys():
-                pass
-
-    def _get_region(self, region):
-        # Find what nodes are part of a region
-        if type(region) is str:
-            labels = self._oriented_nifti_data(region)
-            return np.flatnonzero(labels), op.split(op.abspath(region))[-1]
-        nodes = np.flatnonzero(self.atlas_labels == region)
-        return nodes, "region_%05d" % region
-
-    def set_source(self, g, from_id, weight=0):
-        connected_nodes = np.flatnonzero(self.atlas_labels == from_id)
-        if (from_id in self.label_lut):
-            label_node = self.label_lut[from_id]
-        else:
-            g.addNode()
-            label_node = g.numberOfNodes() - 1
-            self.label_lut[from_id] = label_node
-        for connected_node in connected_nodes:
-            g.addEdge(label_node, connected_node, w=weight)
-        return label_node
-
-    def add_source_region(self, region, weight=0):
-        connected_nodes, name = self._get_region(region)
-        if len(connected_nodes) == 0:
-            raise ValueError("No nonzero nodes in the VoxelGraph")
-        self.graph.addNode()
-        label_node = self.graph.numberOfNodes() - 1
-        self.nonvoxel_nodes.add(label_node)
-        for connected_node in connected_nodes:
-            self.graph.addEdge(label_node, connected_node, w=weight)
-        return label_node
-
-    def add_sink_region(self, region):
-        nodes, name = self._get_region(region)
-        if len(nodes) == 0:
-            raise ValueError("No nonzero nodes in the VoxelGraph")
-        self.graph.addNode()
-        label_node = self.graph.numberOfNodes() - 1
-        self.nonvoxel_nodes.add(label_node)
-        for connected_node in connected_nodes:
-            self.graph.addEdge(connected_node, label_node, w=weight)
-        return label_node
-
-    def set_sink(self, g, to_id, weight=0):
-        connected_nodes = np.flatnonzero(self.atlas_labels == to_id)
-        if (to_id in self.label_lut):
-            label_node = self.label_lut[to_id]
-        else:
-            g.addNode()
-            label_node = g.numberOfNodes() - 1
-            self.label_lut[to_id] = label_node
-        for connected_node in connected_nodes:
-            if (g.hasEdge(label_node, connected_node)):
-                g.removeEdge(label_node, connected_node)
-            g.addEdge(connected_node, label_node, w=weight)
-        return label_node
-
-    def region_voxels_to_region_query(self,
-                                      from_region,
-                                      to_region,
-                                      write_trk="",
-                                      write_prob="",
-                                      write_nifti="",
-                                      write_wm_maxprob_map=""):
-        """
-        Query paths from one region to another. Parameters ``from_region``
-        and ``to_region`` can be a path to a nifti file or a region ID
-        if an atlas has been added through the ``add_atlas`` function.
-        The probability of being connected to the ``to_region`` is calculated
-        for every voxel in the ``from_region``.
-
-        Parameters:
-        ===========
-
-        from_region:str,int
-          Region from which the probability will be calculated for
-          every voxel along the shortest path to any voxel in the
-          ``to_region``.
-
-        to_region:str,int
-          The "sink" region.
-
-        write_trk:str
-          Suffix that will be added to the trackvis output. If empty a
-          trackvis file won't be written.
-
-        write_prob:str
-          suffix for a txt file that contains the probability for each
-          path. These files can be loaded into DSI Studio to color the
-          streamlines.
-
-        write_nifti:str
-          Write the probabilities to a NIfTI file. Each voxel in ``from_region``
-          will contain its probability.
-
-        write_wm_maxprob_map:str
-          Writes a map where each voxel contains the probability of the maximum
-          probability path that goes through it.
-        """
-        # Get lists of nodes for the query
-        from_nodes, from_name = self._get_region(from_region)
-        to_nodes, to_name = self._get_region(to_region)
-
-        # Loop over all the voxels in the from_region
-        sink_label_node = self.set_source(self.graph, to_region)
-
-        # Find the connected components
-        undirected_version = self.graph.toUndirected()
-        components = networkit.components.ConnectedComponents(undirected_version)
-        components.run()
-        logger.info("Found %d components in the graph", components.numberOfComponents())
-        target_component = components.componentOfNode(sink_label_node)
-
-        n = networkit.distance.Dijkstra(self.graph, sink_label_node)
-        t0 = time()
-        n.run()
-        t1 = time()
-        logger.info("Computed shortest paths in %.05f sec", t1 - t0)
-
-        trk_paths = []
-        probs = np.zeros(self.nvoxels, dtype=np.float)
-        maxprobs = np.zeros(self.nvoxels, dtype=np.float)
-        for node in tqdm(from_nodes):
-            if components.componentOfNode(node) == target_component:
-                path = n.getPath(node)
-                if not len(path): continue
-                score = self.get_path_probability(self.graph, path)
-                probs[node] = score
-                if write_trk:
-                    trk_paths.append(path[1:-1])
-                if write_wm_maxprob_map:
-                    path = np.array(path)
-                    path = path[path < self.nvoxels]
-                    maxprobs[path] = np.maximum(maxprobs[path], score)
-
-        # Write outputs
-        if write_prob:
-            g = open("%s_to_%s_%s.txt" % (from_name, to_name, write_trk), "w")
-            for prob in probs:
-                g.write("%.9f\n" % prob)
-            g.close()
-        if write_trk:
-            if write_trk.endswith(".trk") or write_trk.endswith(".trk.gz"):
-                self._write_trk(trk_paths, write_trk)
-            elif write_trk.endswith("txt"):
-                self._write_trk_txt(trk_paths, write_trk)
-        if write_nifti:
-            self.save_nifti(probs, write_nifti)
-        if write_wm_maxprob_map:
-            self.save_nifti(maxprobs, write_wm_maxprob_map)
-
-        return trk_paths, probs
-
-    def _write_trk(self, paths, trk_file_name):
-        if not len(paths):
-            logger.warning("Empty paths, not writing %s", trk_file_name)
-            return
-        header = hdr.copy()
-        header['voxel_size'] = self.voxel_size.astype("<f4")
-        header['dim'] = self.volume_grid.astype('<i2')
-        trk_paths = [(self.voxel_coords[np.array(path[1:-1])] * self.voxel_size, None,
-                      None) for path in paths]
-        nib.trackvis.write(trk_file_name, trk_paths, header)
-
-    def _write_trk_txt(self, paths, txt_file_name):
-        if not len(paths):
-            logger.warning("Empty paths, not writing %s", trk_file_name)
-            return
-
-        str_paths = []
-        for path in trk_paths:
-            str_paths.append(
-                " ".join(["%d %d %d" % tuple(self.voxel_coords[step]) \
-                        for step in path[1:-1]]))
-
-        with open(txt_file_name, "w") as f:
-            f.write("\n".join(str_paths))
-
-    # Utility functions
-    def get_edge_weights(self):
-        return np.array([self.graph.weight(e[0], e[1]) for e in self.graph.edges()])
-
-    def to_undirected_graph(self):
-        if self.graph.isDirected():
-            self.graph = self.graph.toUndirected()
-        else:
-            logger.warn("Graph is already undirected")
-
-    # Shortest paths
-    def Dijkstra(self, g, source, sink):
-        d = networkit.distance.Dijkstra(g, source, target=sink)
-        d.run()
-        path = d.getPath(sink)
-        return path
-
-    def BottleneckShortestPath(self, g, source, sink):
-        d = networkit.graph.BottleneckSP(g, source, target=sink)
-        d.run()
-        path = d.getPath(sink)
-        return path
-
-    def get_prob(self, g, path):
-        prob = 1
-        for step in range(len(path) - 1):
-            prob *= np.e**(-g.weight(path[step], path[step + 1]))
-        return prob
-
-    def get_path_probability(self, g, path):
-        prob = self.get_prob(g, path)
-        prob = prob**(1. / len(path))
-        return prob
-
-    def _get_path_weights(self, g, path):
-        return np.array(
-            [g.weight(path[step], path[step + 1]) for step in range(len(path) - 1)])
-
-    def get_bottleneck_scores_for_path(self, g, path):
-        """
-        Extracts weights along a path in a graph and returns the
-        cumulative weight and the mean weight along the path
-        """
-        if self.weighting_scheme is None:
-            raise ValueError("Build a graph first")
-
-        # Get weights out of the graph
-        path_len = len(path)
-        path_values = self._get_path_weights(g, path)
-        if DISCONNECTED in path_values:
-            return 0, 0
-
-        # Negate and exponentiate the weights to get back probabilities
-        if "negative_log" in self.weighting_scheme:
-            prob = np.exp(-np.max(path_values))
-            return prob, prob**(1. / path_len)
-        # return the product and mean along the path
-        return np.min(path_values), np.mean(path_values)
-
-    def get_scores_for_path(self, g, path):
-        """
-        Extracts weights along a path in a graph and returns the
-        cumulative weight and the mean weight along the path
-        """
-        if self.weighting_scheme is None:
-            raise ValueError("Build a graph first")
-
-        # Get weights out of the graph
-        path_len = len(path)
-        path_values = self._get_path_weights(g, path)
-        if DISCONNECTED in path_values:
-            return 0, 0
-
-        # Negate and exponentiate the weights to get back probabilities
-        if "negative_log" in self.weighting_scheme:
-            prob = np.exp(np.sum(-path_values))
-            return prob, prob**(1. / path_len)
-        # return the product and mean along the path
-        return np.prod(path_values), np.mean(path_values)
-
-    def get_maximum_spanning_forest(self):
-        forest = networkit.graph.UnionMaximumSpanningForest(self.graph)
-        forest.run()
-        return forest.getUMSF()
-
-    def add_null_graph(self, null_graph):
-        """
-        Specifies a graph that can be used for comparisons in certain functions
-
-        Parameters:
-        ===========
-
-        null_graph:mittens.VoxelGraph
-          The VoxelGraph object that will be kept around for comparisons
-
-        """
-
-        if not null_graph.nvoxels == self.nvoxels and np.all(
-                self.flat_mask == null_graph.flat_mask):
-            raise ValueError("Null Graph must have the same number of voxels")
-
-        self.null_graph = null_graph
-
-    # Voxel value functions
-    def backprop_prob_ratio_map(self, source_region, use_bottleneck=False):
-        """
-        Calculates the highest probability ratio of any shortest path going throungh each voxel
-
-        Parameters:
-        ===========
-        source_region:str or int
-          Either the integer ROI ID after ``add_atlas`` has been called, or a path
-          to a NIfTI file where nonzero values are the source voxels.
-
-        Returns:
-        ========
-        None
-
-        """
-        if self.null_graph is None:
-            raise ValueError("A null graph must be set using VoxelGraph.add_null_graph()")
-
-        starting_region, region_name = self._get_region(source_region)
-        source_label_node = self.set_source_using_nifti(self.graph, starting_region)
-
-        # Find the connected components
-        undirected_version = self.graph.toUndirected()
-        components = networkit.components.ConnectedComponents(undirected_version)
-        components.run()
-        #logger.info("Found %d components in the graph", components.numberOfComponents())
-        target_component = components.componentOfNode(source_label_node)
-
-        # Run the modified Dijkstra algorithm from networkit
-        n = networkit.distance.Dijkstra(self.graph, source_label_node)
-        n.run()
-        #logger.info("Computed shortest paths")
-
-        # Collect the shortest paths to each voxel and calculate a score
-        raw_scores = np.zeros(self.nvoxels, dtype=np.float)
-        null_scores = np.zeros(self.nvoxels, dtype=np.float)
-        path_lengths = np.zeros(self.nvoxels, dtype=np.float)
-        backprop = np.zeros(self.nvoxels, dtype=np.float)
-        for node in tqdm(np.arange(self.nvoxels)):
-            print(node)
-            if components.componentOfNode(node) == target_component:
-                path = n.getPath(node)
-                if len(path):
-                    raw_scores[node] = self.get_prob(self.graph, path)
-                    null_scores[node] = self.get_prob(self.null_graph, path)
-                    prob_ratio = raw_scores[node] / null_scores[node]
-                    path = np.array(path)
-                    path = path[path < self.nvoxels]
-                    backprop[path] = np.maximum(backprop[path], prob_ratio)
-                else:
-                    logger.info("Shortest path map didn't find a path")
-                path_lengths[node] = len(path)
-        return raw_scores, null_scores, path_lengths, backprop
-
-    def remove_nonvoxel_nodes(self):
-        def rm_out(in_node, out_node, a, b):
-            self.graph.removeEdge(in_node, out_node)
-
-        def rm_in(out_node, in_node, a, b):
-            self.graph.removeEdge(in_node, out_node)
-
-        while len(self.nonvoxel_nodes):
-            node = self.nonvoxel_nodes.pop()
-            self.graph.forEdgesOf(node, rm_out)
-            self.graph.forInEdgesOf(node, rm_in)
-            self.graph.removeNode(node)
-
-    def shortest_path_map(self,
-                          source_region,
-                          use_bottleneck=False,
-                          back_propagate_scores=True):
-        """
-        Calculates the shortest paths and their scores from ``source_region`` to all
-        other nodes (voxels) in the graph.
-
-        Parameters:
-        ===========
-        source_region:str or int
-          Either the integer ROI ID after ``add_atlas`` has been called, or a path
-          to a NIfTI file where nonzero values are the source voxels.
-
-        nifti_prefix:str
-          Path to where outputs will be written. This prefix will have _something.nii.gz
-          appended to it.
-
-        Returns:
-        ========
-        raw_scores:np.ndarray
-                nifti_prefix + "_shortest_path_score%s.nii.gz"%suffix)
-
-        scores:np.ndarray
-                nifti_prefix + "_shortest_path_mean_score%s.nii.gz"%suffix)
-
-        path_lengths:np.ndarray
-                nifti_prefix + "_shortest_path_length%s.nii.gz"%suffix)
-
-        backprop_scores:np.ndarray
-                nifti_prefix + "_shortest_path_backprop%s.nii.gz"%suffix)
-        """
-        self.remove_nonvoxel_nodes()
-        starting_region, region_name = self._get_region(source_region)
-        source_label_node = self.add_source_region(source_region)
-        # Re-calculate components with the source node included
-        self.update_component_ids()
-        target_component = self.undirected_component_ids[source_label_node]
-
-        # Run the modified Dijkstra algorithm from networkit
-        if use_bottleneck:
-            raise NotImplementedError()
-        else:
-            n = networkit.distance.Dijkstra(self.graph, source_label_node)
-            score_func = self.get_scores_for_path
-        t0 = time()
-        n.run()
-        t1 = time()
-        logger.info("Computed shortest paths in %.05f sec", t1 - t0)
-
-        # Collect the shortest paths to each voxel and calculate a score
-        scores = np.zeros(self.nvoxels, dtype=np.float)
-        raw_scores = np.zeros(self.nvoxels, dtype=np.float)
-        path_lengths = np.zeros(self.nvoxels, dtype=np.float)
-        backprop = np.zeros(self.nvoxels, dtype=np.float)
-        for node in np.arange(self.nvoxels):
-            if self.undirected_component_ids[node] == target_component:
-                path = n.getPath(node)
-                if len(path):
-                    raw_scores[node], scores[node] = score_func(self.graph, path)
-                    if back_propagate_scores:
-                        path = np.array(path)
-                        path = path[path < self.nvoxels]
-                        backprop[path] = np.maximum(backprop[path], scores[node])
-                else:
-                    logger.info("Shortest path map didn't find a path")
-                path_lengths[node] = len(path)
-
-        # Clean up afterwards
-        self.remove_nonvoxel_nodes()
-        if back_propagate_scores:
-            return raw_scores, scores, path_lengths, backprop
-        return raw_scores, scores, path_lengths
-
-    def update_component_ids(self):
-        self.undirected_component_ids = self.get_undirected_node_component_ids()
-
-    def get_undirected_node_component_ids(self):
-        undir_graph = self.graph.toUndirected()
-        components = networkit.components.ConnectedComponents(undir_graph)
-        components.run()
-        return np.array([components.componentOfNode(node) for \
-                         node in range(self.graph.numberOfNodes())])
-
-    def voxelwise_approx_betweenness(self, nSamples=500, normalized=True, parallel=True):
-        btw = \
-            networkit.centrality.ApproxBetweenness2(self.graph, nSamples=nSamples,
-                    normalized=normalized,parallel=parallel)
-        btw.run()
-        return np.array(btw.scores())
-
-    # Capacity
-    def flow(self, mask_image, to_id, from_id, fname):
-        self.build_graph(weighting_scheme="transition probability", doubleODF=True)
-        self.add_atlas(mask_image)
-
-        source_node = self.set_source(self.graph, to_id, weight=1)
-        sink_node = self.set_sink(self.graph, from_id, weight=1)
-
-        self.graph.indexEdges()
-
-        f = networkit.flow.EdmondsKarp(self.graph, source_node, sink_node)
-        f.run()
-
-        max_flow = f.getMaxFlow()
-        flow_vec = np.array(f.getFlowVector())
-        scores_incoming = np.zeros(self.nvoxels)
-        scores_outgoing = np.zeros(self.nvoxels)
-        for i, edge in enumerate(self.graph.edges()):
-            if (edge[0] >= self.nvoxels or edge[1] >= self.nvoxels):
-                continue
-            scores_incoming[edge[1]] += flow_vec[i]
-            scores_outgoing[edge[0]] += flow_vec[i]
-        self.save_nifti(scores_incoming, fname + "_incoming.nii.gz")
-        self.save_nifti(scores_outgoing, fname + "_outoging.nii.gz")
-
-        source_set = np.array(f.getSourceSet())
-        red_nodes = source_set
-        blue_nodes = np.setdiff1d(np.arange(self.nvoxels), red_nodes)
-
-        outputs = np.zeros(self.nvoxels)
-        outputs[red_nodes[red_nodes < self.nvoxels]] = 1
-        outputs[blue_nodes[blue_nodes < self.nvoxels]] = 2
-
-        self.save_nifti(outputs, fname + "_split.nii.gz")
-        return max_flow
-
-    def katz_centrality(self, alpha=5e-4, beta=0.1, tol=1e-8):
-        """
-        Works with directed or undirected graphs.
-
-        Parameters:
-        ===========
-        alpha:float
-          asdfadsf
-
-        beta:float
-
-        tol:float
-
-        Returns:
-        ========
-
-        scores:np.ndarray
-          Katz centrality scores
-
-        ranks:
-        """
-        katz = networkit.centrality.KatzCentrality(self.graph)
-        katz.run()
-        scores = np.array(katz.scores())
-        rankings = np.array(katz.ranking())
-        ranks = np.zeros(self.nvoxels, dtype=np.float)
-        ranks[rankings[:, 0].astype(np.int)] = rankings[:, 1]
-
-        return scores, ranks
-
-    def build_atlas_graph(self, full_region_ids=None):
-        """
-        After adding an atlas using VoxelGraph.add_atlas() this function
-        calculates inter-regional connectivity.
-        """
-        if self.atlas_labels is None or not len(self.atlas_labels) == self.nvoxels:
-            raise ValueError("No atlas labels are available")
-
-        # Set up the label set
-        available_labels = np.unique(self.atlas_labels[self.atlas_labels > 0])
-        if full_region_ids is not None:
-            full_region_ids.sort()
-            labels_to_calculate = np.intersect1d(available_labels, full_region_ids)
-            if not len(labels_to_calculate) == len(full_region_ids):
-                logger.warning("full_region_ids does not match available labels,"
-                               "this can result in a disconnected node")
-        else:
-            full_region_ids = available_labels
-            labels_to_calculate = available_labels
-
-        # Build the output graph objects
-        asym_raw_prob_graph = networkit.Graph(
-            n=len(full_region_ids), directed=True, weighted=True)
-        asym_mean_prob_graph = networkit.Graph(
-            n=len(full_region_ids), directed=True, weighted=True)
-        asym_path_length_graph = networkit.Graph(
-            n=len(full_region_ids), directed=True, weighted=True)
-        conj_raw_prob_graph = networkit.Graph(
-            n=len(full_region_ids), directed=False, weighted=True)
-        conj_mean_prob_graph = networkit.Graph(
-            n=len(full_region_ids), directed=False, weighted=True)
-
-        # Calculate spaci maps for each region
-        outgoing_spaci = {}
-        for node_id, region_label in enumerate(full_region_ids):
-            if region_label not in available_labels:
-                continue
-            raw_scores, scores, path_lengths = self.shortest_path_map(
-                source_region=region_label, back_propagate_scores=False)
-            outgoing_spaci[region_label] = {
-                'raw_probs': raw_scores,
-                'mean_probs': scores,
-                'path_length': path_lengths
-            }
-        # Get masks for each region
-        region_masks = {}
-        for region_label in full_region_ids:
-            region_masks[region_label] = self.atlas_labels == region_label
-
-        # Add in the edge weights
-        for from_node_id, from_region_label in tqdm(enumerate(full_region_ids)):
-            from_mask = region_masks[from_region_label]
-            from_spaci = outgoing_spaci[from_region_label]
-            from_raw_probs = from_spaci['raw_probs']
-            from_mean_probs = from_spaci['mean_probs']
-            from_path_length = from_spaci['path_length']
-
-            for to_node_id, to_region_label in enumerate(full_region_ids):
-                to_mask = region_masks[to_region_label]
-                # Extract values from voxels in 'to mask'
-                asym_raw_prob_graph.addEdge(from_node_id, to_node_id,
-                                            from_raw_probs[to_mask].max())
-                asym_mean_prob_graph.addEdge(from_node_id, to_node_id,
-                                             from_mean_probs[to_mask].max())
-                asym_path_length_graph.addEdge(from_node_id, to_node_id,
-                                               from_path_length[to_mask].min())
-
-                # Get maps from the "to node"
-                to_spaci = outgoing_spaci[to_region_label]
-                to_raw_probs = to_spaci['raw_probs']
-                to_mean_probs = to_spaci['mean_probs']
-                # Get values for conjunction of "from node" and "to node"
-                conj_raw_probs = from_raw_probs * to_raw_probs
-                conj_raw_prob_graph.addEdge(from_node_id, to_node_id,
-                                            conj_raw_probs[to_mask].max())
-                conj_mean_probs = from_mean_probs * to_mean_probs
-                conj_mean_prob_graph.addEdge(from_node_id, to_node_id,
-                                             conj_mean_probs[to_mask].max())
-
-        return asym_raw_prob_graph, asym_mean_prob_graph, asym_path_length_graph, conj_raw_prob_graph, conj_mean_prob_graph
-
-    # Plotting
-    def _plot_slice(self,
-                    node_data,
-                    slice_axis="y",
-                    slice_func=np.max,
-                    zero_ones=True,
-                    invisible_zeros=True,
-                    ax=None,
-                    show_colorbar=True):
-
-        if not has_matplotlib:
-            logger.warning("Matplotlib not available")
-            return
-
-        if zero_ones:
-            data = node_data.copy()
-            data[data == 1] = 0.000001
-        else:
-            data = node_data
-
-        if invisible_zeros:
-            data[data == 0] = np.nan
-        # Turn values into 3d
-        as_mat = 1 / np.zeros_like(vgraph.flat_mask)
-        as_mat[vgraph.flat_mask] = data
-        as_mat = as_mat.reshape(vgraph.volume_grid, order="F")[::-1, ::-1]
-
-        if ax is None:
-            fig, ax = plt.subplots()
-
-        if slice_axis == "x":
-            data2d = slice_func(as_mat, axis=0)
-        elif slice_axis == "y":
-            data2d = slice_func(as_mat, axis=1)
-        elif slice_axis == "z":
-            data2d = slice_func(as_mat, axis=2)
-        else:
-            raise ValueError
-
-        ax.imshow(
-            data2d,
-            interpolation="nearest",
-            cmap="viridis",
-            origin="lower",
-            norm=LogNorm())
-        ax.grid(False)
-        ax.set_xticks([])
-        ax.set_yticks([])
-
-    def plot_vectors(self,
-                     background_data=None,
-                     slice_axis="y",
-                     slice_num=0,
-                     ax=None,
-                     show_colorbar=True,
-                     arrow_zoom=2,
-                     xlim=None,
-                     ylim=None,
-                     min_weight=0,
-                     plot_voxel_boundaries=True,
-                     quiveropts=dict(
-                         headlength=0,
-                         pivot='tail',
-                         scale=1,
-                         linewidth=.5,
-                         units='xy',
-                         width=.045,
-                         headwidth=1,
-                         cmap="viridis",
-                         angles="xy",
-                         scale_units='xy',
-                         clim=(0, 0.35))):
-        """
-        Produces a quiver plot for a selected slice of the 3D volume. Probably not very fast.
-        """
-        if not has_matplotlib:
-            logger.warning("Matplotlib not available")
-            return
-
-        if ax is None:
-            fig, ax = plt.subplots()
-
-        # If background data is provided, do an image plot in grayscale
-        if background_data is not None:
-            # Turn values into 3d
-            as_mat = 1 / np.zeros_like(vgraph.flat_mask)
-            as_mat[vgraph.flat_mask] = data
-            as_mat = as_mat.reshape(vgraph.volume_grid, order="F")[::-1, ::-1]
-            if slice_axis == "x":
-                data2d = slice_func(as_mat, axis=0)
-            elif slice_axis == "y":
-                data2d = slice_func(as_mat, axis=1)
-            elif slice_axis == "z":
-                data2d = slice_func(as_mat, axis=2)
-            else:
-                raise ValueError
-            ax.imshow(data2d, interpolation="nearest", cmap="gray", origin="lower")
-
-        # Select only nodes within the slice
-        if slice_axis == "x":
-            selected_nodes = np.flatnonzero(self.voxel_coords[:, 0] == slice_num)
-            selected_coords = self.voxel_coords[selected_nodes][:, np.array([1, 2])]
-        elif slice_axis == "y":
-            selected_nodes = np.flatnonzero(self.voxel_coords[:, 1] == slice_num)
-            selected_coords = self.voxel_coords[selected_nodes][:, np.array([0, 2])]
-        elif slice_axis == "z":
-            selected_nodes = np.flatnonzero(self.voxel_coords[:, 2] == slice_num)
-            selected_coords = self.voxel_coords[selected_nodes][:, np.array([0, 1])]
-        else:
-            raise ValueError
-
-        max_scale_fac = quiveropts['clim'][1]
-        coords = []
-        vecs = []
-        weights = []
-        for from_node_index, from_node in enumerate(selected_nodes):
-            for to_node_index, to_node in enumerate(selected_nodes):
-                if from_node == to_node or not self.graph.hasEdge(from_node, to_node):
-                    continue
-                weight = np.exp(-self.graph.weight(from_node, to_node))
-                if weight < min_weight: continue
-                weights.append(weight)
-                # Which direction should the arrow be pointing?
-                dir_vec = unit_vector(selected_coords[to_node_index] -
-                                      selected_coords[from_node_index])
-                scale_fac = min(max_scale_fac, weight * arrow_zoom)
-                coords.append(selected_coords[from_node_index])
-                vecs.append(dir_vec * scale_fac)
-        x, y = np.array(coords).T + 0.5  # center in the voxel
-        u, v = np.array(vecs).T
-        c = np.array(weights)
-
-        if plot_voxel_boundaries:
-            ax.set_xticks(np.arange(int(x.max() + 1)))
-            ax.set_yticks(np.arange(int(y.max() + 1)))
-            ax.grid(b=True, color="k", lw=0.5, linestyle="-")
-
-        ax.quiver(x, y, u, v, c, **quiveropts)
-        ax.grid(False)
-        plt.axis("equal")
-        if xlim is not None:
-            ax.set_xlim(xlim)
-        if ylim is not None:
-            ax.set_ylim(ylim)
+    # -- output -----------------------------------------------------------
+
+    def to_nifti(self, values, path) -> None:
+        """Write one value (or vector) per voxel as a NIfTI image on the ODF grid."""
+        values = np.asarray(values)
+        vol = np.zeros(self.dims + values.shape[1:], dtype=np.float32)
+        vol[tuple(self.ijk.T)] = values
+        nib.Nifti1Image(vol, self.affine).to_filename(str(path))
+
+    def streamlines(self, paths) -> list[np.ndarray]:
+        """World (RAS mm) coordinates of the voxel centers along each path."""
+        return [nib.affines.apply_affine(self.affine, self.ijk[np.asarray(p, dtype=np.int64)]) for p in paths]
+
+    def save_streamlines(self, paths, filename) -> None:
+        """Write paths as a ``.trk`` or ``.tck`` tractogram."""
+        from nibabel.streamlines import Field, Tractogram
+
+        tractogram = Tractogram(self.streamlines(paths), affine_to_rasmm=np.eye(4))
+        header = {
+            Field.VOXEL_TO_RASMM: self.affine,
+            Field.DIMENSIONS: np.array(self.dims, dtype=np.int16),
+            Field.VOXEL_SIZES: np.sqrt((self.affine[:3, :3] ** 2).sum(0)).astype(np.float32),
+            Field.VOXEL_ORDER: "".join(nib.aff2axcodes(self.affine)),
+        }
+        nib.streamlines.save(tractogram, str(filename), header=header)
+
+    def save(self, path) -> None:
+        """Save to a ``.npz`` file."""
+        extra = {} if self.atlas is None else {"atlas": self.atlas}
+        np.savez_compressed(path, source=self.source, target=self.target, p=self.p, ijk=self.ijk,
+                            dims=np.array(self.dims), affine=self.affine, null=self.null,
+                            weights=np.str_(self.weights), **extra)
+
+    @classmethod
+    def load(cls, path) -> "VoxelGraph":
+        z = np.load(path)
+        vg = cls(z["source"], z["target"], z["p"], z["ijk"], z["dims"], z["affine"], z["null"], str(z["weights"]))
+        if "atlas" in z.files:
+            vg.atlas = z["atlas"]
+        return vg

@@ -2,237 +2,178 @@
 
 # MITTENS
 
-MITTENS is a python library that performs analytical tractography
-on reconstructed diffusion-weighted MRI data. Currently the output
-from DSI Studio is supported.  
+**M**athematical solution for **I**ntervoxel **T**ract **T**ransition
+**E**xpectations requiring **N**o **S**imulations.
 
+MITTENS computes the probability that a white-matter fiber leaving a voxel
+enters each of its 26 neighbors, in closed form, from that voxel's
+orientation distribution function (ODF). See Cieslak et al. (2018),
+[*Analytic tractography*](https://doi.org/10.1016/j.neuroimage.2017.12.039),
+NeuroImage 169:473–484.
 
-# Table of Contents
-1. [Installation](#installation)
-  * [Adding Geometric Constraints](#adding-geometric-constraints)
-2. [Preparing your data](#preparing-your-data)
-3. [Calculating intervoxel fiber transition probabilities](#calulating-intervoxel-fiber-transition-probabilities)
-4. [`VoxelGraph` Construction](#voxel-graph-construction)
-  * [Finding and visualizing connections between regions](#finding-and-visualizing-connections-between-regions)
-  * [Building an `AtlasGraph`](#building-an-atlas-graph)
+Version 2 is a rewrite: a small Rust core (PyO3) replaces the generated
+Fortran, all file formats go through [odx](https://github.com/PennLINC/odx-rs),
+and voxel-graph tractography runs on [igraph](https://python.igraph.org)
+instead of networkit.
 
+## What's new in v2
 
+- **No precompiled geometry.** A fiber is a sequence of fixed-length hops.
+  For each sequence, the starting points that exit into a given neighbor
+  form an axis-aligned box with an exact volume. v1 shipped these volumes as
+  ~250k lines of generated Fortran for one sphere, step size and angle
+  (odf8, √3/2, 35°). v2 enumerates them at runtime in milliseconds for any:
+  - sphere and step size
+  - maximum angle or turning prior
+  - voxel shape, including anisotropic and oblique voxels
+- **Exact in float64.** v1's literals had no `d0` kind suffix, so gfortran
+  rounded every coefficient to float32 (relative error up to 6e-8). v2
+  reproduces every v1 coefficient to 1e-12.
+- **SH input without resampling.** Spherical-harmonic coefficients are
+  evaluated on the quadrature sphere inside the kernel. You can use a sphere
+  denser than odf8 with `TransitionModel(sphere=1281)`, and memory stays
+  proportional to the number of SH coefficients.
+- **FOD amplitudes are used.** v1 renormalized every ODF to sum to one, so a
+  CSF voxel and dense white matter sent the same total probability to their
+  neighbors. v2's stop-mass model adds a "stop" outcome of weight `tau` to
+  every hop choice, so weak FOD support terminates fibers. With `tau=0`
+  results are identical to v1.
+- **Asymmetric ODFs.** The full signed sphere is the default. Symmetric data
+  is folded onto a hemisphere only as a speed-up. Inputs can be full-basis
+  (odd-order) SH or pyAFQ aODFs.
+- **Voxel graphs on igraph.** Most probable paths between regions, path
+  probability maps, atlas connectivity, betweenness and maximum flow. Graphs
+  are built from the probabilities in one vectorized step and work on the
+  data's own voxel grid and affine.
 
 ## Installation
 
-NOTE: On Mac OS you may need to specify the path to a recent c++
-compiler (download gcc-8 from homebrew) E.g. ``export CXX=/usr/local/bin/g++-8``. You might also
-need to edit the setup.py script to include
-
-```
-# initialize Extension module with the appropriate source file
-modules = [Extension("_NetworKit",
-        src,
-        language = "c++",
-        extra_compile_args=["-fopenmp", "-std={}".format(stdflag), "-O3", "-DNOGTEST"],
-        extra_link_args=['-fopenmp', "-std={}".format(stdflag),'-lgomp', '-Wl,-rpath,/usr/local/opt/gcc/lib/gcc/8/'], # <- NEW!
-        libraries=["NetworKit-Core-{0}".format(optimize)],
-        library_dirs=["./"])]
-```
-
-While this software can be installed like any other python package,
-it is possible to add custom compiled functions before installation.
-Analytic tractography requires the specification of a set of geometric
-constraints for inter-voxel tract transition expectations can be
-solved. MITTENS comes with the functions used to perform the analyses
-described in [our paper], but nothing more.
-
-You can add as many sets of geometric constraints as you like, but be
-warned that it can take awhile to compile them.  Remember you only
-need to compile a solution __once__. Also beware that some
-combinations of step size and turning angle maximum result in infinite
-sets of turning angle sequences. Python will crash with a recursion error
-in this case.
-
-### Adding Geometric Constraints (optional)
-
-Download the current version of MITTENS and enter its source tree:
+The distribution is named `mittens-dmri`, because `mittens` on PyPI is an
+unrelated word-embedding package. The import name is still `mittens`.
 
 ```bash
-$ git clone https://github.com/mattcieslak/MITTENS.git
-$ cd MITTENS
+pip install maturin
+maturin develop --release   # from a clone of this repository
 ```
 
-Now, launch a python session in the mittens directory
+This needs a Rust toolchain ([rustup](https://rustup.rs)) and installs
+`numpy`, `scipy`, `nibabel`, `odx` and `igraph`.
+
+## Quick start
 
 ```python
->>> from mittens.write_solution import write_solution
->>> write_solution("odf8", 35, 1.0)
+from mittens import TransitionModel, load_odf_data
+
+data = load_odf_data("sub-01_dwimap.odx")    # or .fib.gz / .fz, or an odx.Odx
+model = TransitionModel()                    # v1 defaults: step √3/2 voxel, 35°
+result = model.fit(data)
+
+result.single          # (N, 26) single-ODF transition probabilities
+result.double          # (N, 26) double-ODF, sub-stochastic
+result.codi_single     # compositional distance from isotropic (CoDI)
+result.neighbor_labels # e.g. "ras" for right-anterior-superior
+result.to_nifti("sub-01")       # 4D NIfTIs + JSON sidecar
+result.to_odx("sub-01_mittens.odx")
 ```
 
-This will write out two fortran files in the current directory. They are named
-after the parameters you chose. This particular example will read data
-reconstructed with 8-fold ODF tesselation, a turning angle maximum of 35
-degrees and a step size of 1.0 voxel units (voxels are assumed to be
-isotropic).
+Columns follow `mittens.neighbor_offsets()`, the 26 index-space offsets
+`(di, dj, dk)` in lexicographic order. Rows follow `data.ijk`.
 
-After some calculations you will find
-``doubleODF_odf8_ss1_00_am35.f90`` and ``singleODF_odf8_ss1_00_am35.f90``
-in the current directory. Move these files into the ``src/`` directory
-and install the package with ``pip``. We recommend using an editable
-install, which will keep all these files in their current directory:
+### Choosing the geometry
+
+```python
+TransitionModel(step_mm=1.8, angle_max=35)        # explicit step and angle
+TransitionModel(min_radius_mm=2.5)                # same fiber curvature at any resolution
+TransitionModel(turning="vmf", persistence_length_mm=10.0)  # worm-like-chain prior
+TransitionModel(sphere=1281)                      # SH data on a 2562-direction sphere
+```
+
+With the v1 parameters the step is in voxels. The implied minimum radius of
+curvature is 1.44 voxels, so the physical fiber model changes with
+resolution. Use `min_radius_mm` to hold it fixed.
+
+### Using FOD amplitudes
+
+```python
+result = TransitionModel(tau=0.1).fit(data)
+result.p_terminate_single      # probability a fiber stops in each voxel
+```
+
+`tau` is in per-direction amplitude units, and it is compared with the
+*mean* amplitude over the turning cone, not with a peak. Useful values are
+therefore much smaller than iFOD2's peak cutoff. For one mtnormalised
+MSMT-CSD subject (2 mm), the mean amplitude in white matter is about 0.05,
+and `tau=0.003` stops about 9% of the mass in dense white-matter voxels.
+`tau` is only meaningful when amplitudes are comparable across voxels.
+
+## Voxel-graph tractography
+
+```python
+from mittens import VoxelGraph
+
+vg = VoxelGraph.from_transitions(result, model="double")
+vg = vg.mask("wm_mask.nii.gz")          # keep only these voxels
+vg.add_atlas("atlas.nii.gz")            # regions can now be atlas labels
+
+sp = vg.shortest_paths_from(17)         # most probable path from region 17 to every voxel
+vg.to_nifti(sp.mean_probability, "from17_mean.nii.gz")
+vg.to_nifti(sp.backprop(sp.mean_probability), "from17_backprop.nii.gz")
+
+to53 = vg.shortest_paths_to(53)         # from every voxel to region 53
+vg.save_streamlines(to53.paths(vg.region_nodes(17)), "17_to_53.tck")
+
+conn = vg.atlas_connectivity()          # region x region path scores
+```
+
+Each edge `u -> v` stores a probability `p` and a length `-log p`, so a
+shortest path is the most probable chain of voxel-to-voxel moves.
+`weights` chooses `p`:
+
+- `"transition probability"`: `P(u -> v)` (default);
+- `"minus_iso"`: the part of `P(u -> v)` above an isotropic ODF's;
+- `"minus_iso_scaled"`: the same, rescaled so each voxel's edges sum to 1.
+
+Regions are atlas labels, NIfTI files or images on the ODF grid, or
+arrays. For every voxel, `ShortestPaths` gives the path probability, its
+geometric mean per move, the probability of the same moves under isotropic
+ODFs (`null_probability`), the number of moves, and the path itself.
+`vg.components()`, `vg.betweenness(n_samples=500)` and
+`vg.max_flow(source, sink)` cover the rest of v1's graph measures.
+`vg.graph` is the same graph as an `igraph.Graph`, in the same edge order,
+for any other igraph algorithm (pass `weights=vg.length`).
+
+Changes from v1's `VoxelGraph`:
+
+- Every graph stores both `p` and `-log p`, so the separate
+  `*_negative_log` weighting schemes are gone.
+- The mean path probability is the geometric mean per move. v1 divided by the
+  number of path nodes, including a virtual source node.
+- `shortest_paths_to` follows edges from each voxel toward the target
+  region. v1's region-to-region query searched outward from the target.
+- Graphs are saved as `.npz`, not `.mat`.
+- `AtlasGraph` duplicated `VoxelGraph` and was removed. Also removed:
+  `EnvironmentMatch` (its fixel similarity was a placeholder), the nipype
+  interfaces, Katz centrality, spanning forests and plotting. igraph's
+  centralities and spanning trees are available on `vg.graph`.
+
+## Development
 
 ```bash
-mv *.f90 src/
-pip install -e .
+cargo test -p mittens-core --release
+maturin develop --release && pytest
 ```
 
-This will compile everything in the ``src/`` directory into a
-python module. You can now use these geometric constraints to
-calculate transition expectations.
+- `tests/test_legacy_golden.py` checks the runtime path table against every
+  coefficient of the v1 Fortran. The coefficients were extracted by
+  `tests/data/extract_legacy_golden.py`.
+- `tests/test_kernel_oracle.py` checks the kernel against an independent
+  numpy implementation of v1's formulas.
+- `tests/test_voxel_graph.py` checks shortest paths against
+  `scipy.sparse.csgraph`, and max flow against the min-cut theorem.
+- A Monte Carlo simulation of the hop process (slow test, `-m "not slow"`
+  skips it) checks that the closed-form probabilities are exact.
 
-
-## Preparing your data
-
-DSI Studio can be used to reconstruct diffusion MRI using a variety
-of methods.  You can use any method you like **except for DTI**.
-If you acquired DTI data, choose **GQI** reconstruction instead of
-DTI reconstruction.
-
-![recon_opts](doc/img/recon_options.png)
-
-DSI, GQI and QBI can be selected from this menu.  There are additional
-options not listed on this GUI but are accessible through the commandline.
-For example, ODF deconvolution and decomposition can be used. All
-options in purple boxes can be changed, but it is required that ODF data
-is written in the output file.  Critically, the ``ODF Tesselation``
-option determines the angular resolution of your output ODFs. The choice
-here will result in ``"odf8"`` being the appropriate choice for
-the call to ``write_solutions()`` above.
-
-Data from other diffusion MRI packages such as FSL and MRTRIX can be loaded
-(theoretically) after being ![converted to DSI Studio
-format](http://dsi-studio.labsolver.org/Manual/data-exchange-between-dsi-studio-and-mrtrix).
-
-## Calculating intervoxel fiber transition probabilities
-
-DSI Studio files are read directly by MITTENS:
-
-```python
->>> from mittens import MITTENS
->>> mitns = MITTENS(reconstruction="HCP.src.gz.odf8.f5rec.fy.gqi.1.25.fib.gz")
-```
-
-From here you can estimate none-ahead or one-ahead, where NIfTI-1 files are
-saved for each neighbor direction:
-
-```python
->>> mitns.calculate_transition_probabilities(output_prefix="hcp")
-```
-
-You will find the output in the current working directory (unless you specified an
-absolute path as the argument). There is a single 3D file for each neighbor voxel
-named ``hcp_doubleODF_r_prob.nii.gz``, ``hcp_singleODF_r_prob.nii.gz``,
-``hcp_doubleODF_lpi_prob.nii.gz``, etc.  There will also be CoDI and CoAsy output.
-Instead of re-running the estimations again, you can create a MITTENS object
-by specifying the prefix of the NIfTI files written out during estimation.
-
-```python
->>> nifti_mitns = MITTENS(nifti_prefix="hcp")
-```
-
-This is very fast.
-
-## `VoxelGraph` Construction
-
-MITTENS uses ``networkit`` to construct directed graphs of voxels, where edges
-are weighted by the tract transition expectation from one voxel to another.
-A graph can build directly from MITTENS object.
-
-```python
->>> voxel_graph = mitns.build_graph(doubleODF=True, weighting_scheme="negative_log_p")
->>> voxel_graph.save("hcp_voxel_graph.mat")
-```
-
-There are different schemes available for weighting edges in the graph.
-
-| Option                           | Transformation      | Reference |
-| ---------------------------------|:-------------------:| ----------|
-| `"negative_log_p"`               | negative log of transition probability | Zalesky (2008) |
-| `"minus_iso_negative_log_p"`     | max(0, transition prob - isotropic transition prob) | None yet |
-| `"minus_iso_scaled_negative_log_p"` | Same as above but scaled to sum to 1 across all neighbors of the voxel | None yet |
-| `"transition_probability"` | The transition probability. Not useful for shortest paths | None yet |
-
-You can also build a matching voxel graph using probabilities from isotropic ODFs
-
-```python
->>> null_graph = mitns.build_null_graph(doubleODF=True, purpose="shortest paths")
->>> null_graph.save("hcp_null_voxel_graph.mat")
-```
-Both `voxel_graph` and `null_graph` will be of class `mittens.VoxelGraph`, which contains a `networkit.Graph` and spatial mapping information from the original dMRI data.  You can load these directly from disk using
-
-```python
->>> from mittens import VoxelGraph
->>> loaded_voxel_graph = VoxelGraph("hcp_voxel_graph.mat")
->>> loaded_null_graph = VoxelGraph("hcp_null_voxel_graph.mat")
-```
-
-## Finding and visualizing connections between regions
-
-Assuming the previous steps have been run, we can add an atlas to the graph
-and query for connections between regions. Here we have two cortical regions we'd
-like to connect. These regions are spheres around peak coordinates in primary
-motor cortex (M1) and supplementary motor area (SMA). Here we find the shortest path
-from each voxel in the M1 sphere to any voxel in the SMA sphere. The paths are
-saved to be loaded into DSI Studio as streamlines, optionally with their corresponding
-probabilities.
-
-```python
->>> paths, probs = voxel_graph.region_voxels_to_region_query("lm1_sphere.nii.gz",
-                      "sma_sphere.nii.gz", write_trk="test", write_prob="test")
-
-```
-
-This will write out two files. One is ``lm1_sphere.nii.gz_to_sma_sphere.nii.gz_test.trk.gz``
-and the other is ``lm1_sphere.nii.gz_to_sma_sphere.nii.gz_test.txt``. To load in DSI Studio,
-open the fib file used earlier via the "Step 3: Fiber Tracking" button.  Load the streamlines
-through the context menu and color-code them based on their probabilities:
-
-![recon_opts](doc/img/open_results.png)
-
-the color-coded streamlines are more informative:
-
-![recon_opts](doc/img/prob_color_streamlines.png)
-
-
-
-## Building an `AtlasGraph`
-
-Most network approaches to date use brain regions as nodes. You can add
-brain regions to your `VoxelGraph` like so:
-
-```python
-voxel_graph.add_atlas("aligned_AAL.nii.gz")
-```
-
-This adds a region label to voxels contained within each region. The node
-labels can be examined in the `VoxelGraph.atlas_labels`. No additional actions
-(such as adding abstract "region nodes" or adding edges) are taken initially.
-An `AtlasGraph`, a graph where nodes are brain regions and edges are based
-on shortest paths through the `VoxelGraph` that connect them, can be
-build like so:
-
-```python
-asym_raw_prob_graph, asym_mean_prob_graph, asym_path_length_graph, \
-conj_raw_prob_graph, conj_mean_prob_graph = voxel_graph.build_atlas_graph()
-```
-
-
-Credits
-========
-This source code was sponsored by a grant from the GE/NFL head health challenge.
-The content of the information does not necessarily reflect the position or
-the policy of these companies, and no official endorsement should be inferred.
-
-Authors
--------
- * Matt Cieslak
- * Tegan Brennan
- * Clint Greene
-
-Logo by Allison Shapiro
+`validation/streamline_ground_truth.py` scores MITTENS against a tractogram.
+It builds FODs from the streamlines and uses the same streamlines as ground
+truth; results for the TRXScan sub-60501 phantom are in
+[`validation/README.md`](validation/README.md).
