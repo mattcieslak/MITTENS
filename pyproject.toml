@@ -18,7 +18,7 @@ classifiers = [
     "Programming Language :: Rust",
     "Topic :: Scientific/Engineering",
 ]
-dependencies = ["numpy>=1.26", "scipy>=1.11", "nibabel>=5", "odx>=0.3", "igraph>=0.11"]
+dependencies = ["numpy>=1.26", "scipy>=1.11", "nibabel>=5", "odx>=0.3.2", "igraph>=0.11"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
@@ -31,7 +31,10 @@ manifest-path = "crates/mittens-py/Cargo.toml"
 python-source = "."
 module-name = "mittens._core"
 features = ["pyo3/extension-module"]
-include = [{ path = "mittens/_core.pyi", format = "sdist" }]
+include = [
+    { path = "mittens/_core.pyi", format = "sdist" },
+    { path = "LICENSE", format = "sdist" },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
