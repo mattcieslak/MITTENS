@@ -1,4 +1,4 @@
-![mitten](doc/img/mitten.png)
+![mitten](https://raw.githubusercontent.com/mattcieslak/MITTENS/main/doc/img/mitten.png)
 
 # MITTENS
 
@@ -52,12 +52,19 @@ The distribution is named `mittens-dmri`, because `mittens` on PyPI is an
 unrelated word-embedding package. The import name is still `mittens`.
 
 ```bash
-pip install maturin
-maturin develop --release   # from a clone of this repository
+pip install mittens-dmri
 ```
 
-This needs a Rust toolchain ([rustup](https://rustup.rs)) and installs
-`numpy`, `scipy`, `nibabel`, `odx` and `igraph`.
+This needs Python 3.10 or later and installs `numpy`, `scipy`, `nibabel`,
+`odx` and `igraph`.
+
+To build from a clone of this repository instead, you need a Rust toolchain
+([rustup](https://rustup.rs)):
+
+```bash
+pip install maturin
+maturin develop --release
+```
 
 ## Quick start
 
@@ -176,4 +183,4 @@ maturin develop --release && pytest
 `validation/streamline_ground_truth.py` scores MITTENS against a tractogram.
 It builds FODs from the streamlines and uses the same streamlines as ground
 truth; results for the TRXScan sub-60501 phantom are in
-[`validation/README.md`](validation/README.md).
+[`validation/README.md`](https://github.com/mattcieslak/MITTENS/blob/main/validation/README.md).

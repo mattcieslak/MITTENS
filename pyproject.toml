@@ -31,7 +31,10 @@ manifest-path = "crates/mittens-py/Cargo.toml"
 python-source = "."
 module-name = "mittens._core"
 features = ["pyo3/extension-module"]
-include = [{ path = "mittens/_core.pyi", format = "sdist" }]
+include = [
+    { path = "mittens/_core.pyi", format = "sdist" },
+    { path = "LICENSE", format = "sdist" },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
